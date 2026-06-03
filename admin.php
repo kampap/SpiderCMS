@@ -1,8 +1,9 @@
 <?php
-// admin.php – panel administracyjny Spider CMS
-// Dodana strona startowa (dashboard) po zalogowaniu
-// Menu wróciło do prostej wersji (bez submenu)
-// Wersja: marzec 2026
+// admin.php – panel administracyjny SpiderCMS
+// Dostosowano styl wizualny do mrocznego, neonowego logo systemu
+// Dodano wyświetlanie logo przy napisach SpiderCMS (Sidebar oraz Ekran Logowania)
+// Naprawiono strukturę formularzy (zapis ustawień oraz eksport ZIP działają niezależnie)
+// Wersja: czerwiec 2026
 
 session_start();
 
@@ -34,16 +35,18 @@ $login_error = '';
 // ----------------------------------------------------------------------
 $settings_file = __DIR__ . '/.settings.json';
 $settings = file_exists($settings_file) ? json_decode(file_get_contents($settings_file), true) : [];
-$logo_url = $settings['logo'] ?? '';
+
+// Jako domyślne logo ustawiamy nową grafikę z pająkiem
+$logo_url = $settings['logo'] ?? (BASE_URL . 'assets/images/spider.png');
 
 // ----------------------------------------------------------------------
 // Wczytanie kolorów
 // ----------------------------------------------------------------------
 $theme_file = __DIR__ . '/.theme.json';
 $theme = file_exists($theme_file) ? json_decode(file_get_contents($theme_file), true) : [
-    'primary'      => '#2563eb',
-    'primary-dark' => '#1d4ed8',
-    'accent'       => '#10b981',
+    'primary'      => '#a855f7', // Neonowy fiolet (z górnej części pająka)
+    'primary-dark' => '#7e22ce', // Ciemniejszy fiolet do hoverów
+    'accent'       => '#2563eb', // Elektryzujący błękit (z dolnej części pająka)
 ];
 
 // ----------------------------------------------------------------------
@@ -51,9 +54,9 @@ $theme = file_exists($theme_file) ? json_decode(file_get_contents($theme_file), 
 // ----------------------------------------------------------------------
 function update_all_pages_colors() {
     global $theme;
-    $primary     = $theme['primary']      ?? '#2563eb';
-    $primary_dark = $theme['primary-dark'] ?? '#1d4ed8';
-    $accent      = $theme['accent']       ?? '#10b981';
+    $primary     = $theme['primary']      ?? '#a855f7';
+    $primary_dark = $theme['primary-dark'] ?? '#7e22ce';
+    $accent      = $theme['accent']       ?? '#2563eb';
 
     $root_block = ":root {\n      --primary: {$primary};\n      --primary-dark: {$primary_dark};\n      --accent: {$accent};\n      --gray50: #f9fafb;\n      --gray800: #1f2937;\n    }";
 
@@ -108,7 +111,7 @@ if (!isset($_SESSION['logged_in']) || $_SESSION['logged_in'] !== true) {
             $_SESSION['last_activity'] = time();
             $_SESSION['login_attempts'] = 0;
             $_SESSION['login_block_until'] = 0;
-            header('Location: admin.php?tab=dashboard'); // ← po zalogowaniu idziemy na dashboard
+            header('Location: admin.php?tab=dashboard');
             exit;
         } else {
             $_SESSION['login_attempts']++;
@@ -128,20 +131,28 @@ if (!isset($_SESSION['logged_in']) || $_SESSION['logged_in'] !== true) {
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Logowanie – Panel</title>
+        <title>Logowanie – Panel SpiderCMS</title>
         <style>
-            body{font-family:system-ui,sans-serif;background:linear-gradient(135deg,#e0f2fe,#bae6fd);display:flex;justify-content:center;align-items:center;min-height:100vh;margin:0;}
-            .card{background:#fff;padding:2.8rem 2.2rem;border-radius:14px;box-shadow:0 10px 40px rgba(0,0,0,0.14);width:100%;max-width:400px;}
-            h1{text-align:center;color:#1e40af;margin:0 0 1.8rem;font-size:1.9rem;}
-            input{width:100%;padding:1rem;margin:0.5rem 0 1.5rem;border:1px solid #cbd5e1;border-radius:8px;font-size:1.05rem;}
-            button{width:100%;padding:1rem;background:#1d4ed8;color:white;border:none;border-radius:8px;font-size:1.05rem;font-weight:600;cursor:pointer;}
-            button:hover{background:#1e40af;}
-            .error{color:#dc2626;text-align:center;margin-bottom:1.2rem;font-weight:500;}
+            body{font-family:system-ui,sans-serif;background:linear-gradient(135deg,#0f172a,#1e293b);display:flex;justify-content:center;align-items:center;min-height:100vh;margin:0;}
+            .card{background:#1e293b;padding:2.5rem 2.2rem;border-radius:14px;box-shadow:0 10px 40px rgba(0,0,0,0.4);width:100%;max-width:400px;border:1px solid #334155;color:#f8fafc;}
+            .login-logo-container{text-align:center;margin-bottom:1.5rem;}
+            .login-logo-container img{max-height:90px;width:auto;display:block;margin:0 auto 0.5rem;border-radius:8px;}
+            h1{text-align:center;color:#a855f7;margin:0;font-size:1.9rem;font-weight:700;}
+            input{width:100%;padding:1rem;margin:1.5rem 0;border:1px solid #334155;background:#0f172a;color:#f8fafc;border-radius:8px;font-size:1.05rem;box-sizing:border-box;}
+            input:focus{outline:2px solid #a855f7;}
+            button{width:100%;padding:1rem;background:#a855f7;color:white;border:none;border-radius:8px;font-size:1.05rem;font-weight:600;cursor:pointer;}
+            button:hover{background:#7e22ce;}
+            .error{color:#ef4444;text-align:center;margin-bottom:1.2rem;font-weight:500;}
         </style>
     </head>
     <body>
         <div class="card">
-            <h1>Panel administracyjny</h1>
+            <div class="login-logo-container">
+                <?php if ($logo_url): ?>
+                    <img src="<?= htmlspecialchars($logo_url) ?>" alt="SpiderCMS Logo">
+                <?php endif; ?>
+                <h1>SpiderCMS</h1>
+            </div>
             <?php if ($login_error): ?>
                 <div class="error"><?= htmlspecialchars($login_error) ?></div>
             <?php endif; ?>
@@ -163,7 +174,7 @@ if (!isset($_SESSION['logged_in']) || $_SESSION['logged_in'] !== true) {
 // Panel zalogowany
 // ----------------------------------------------------------------------
 
-$tab = $_GET['tab'] ?? 'dashboard'; // domyślnie dashboard po zalogowaniu
+$tab = $_GET['tab'] ?? 'dashboard';
 
 // ----------------------------------------------------------------------
 // Obsługa POST
@@ -188,7 +199,7 @@ require_once __DIR__ . '/../header.php';
 
 \$title = '$title';
 \$content = <<<HTML
-$content
+\$content
 HTML;
 ?>
 <!DOCTYPE html>
@@ -200,9 +211,9 @@ HTML;
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css">
   <style>
     :root {
-      --primary: <?php echo \$theme['primary'] ?? '#2563eb'; ?>;
-      --primary-dark: <?php echo \$theme['primary-dark'] ?? '#1d4ed8'; ?>;
-      --accent: <?php echo \$theme['accent'] ?? '#10b981'; ?>;
+      --primary: <?php echo \$theme['primary'] ?? '#a855f7'; ?>;
+      --primary-dark: <?php echo \$theme['primary-dark'] ?? '#7e22ce'; ?>;
+      --accent: <?php echo \$theme['accent'] ?? '#2563eb'; ?>;
       --gray50: #f9fafb;
       --gray800: #1f2937;
     }
@@ -211,7 +222,7 @@ HTML;
     .site-header{position:fixed;top:0;left:0;right:0;background:white;box-shadow:0 2px 10px rgba(0,0,0,0.08);z-index:1000;}
     .header-container{max-width:1240px;margin:0 auto;padding:0 1.5rem;display:flex;justify-content:space-between;align-items:center;height:74px;}
     .logo{font-weight:700;font-size:1.4rem;color:var(--primary);text-decoration:none;display:flex;align-items:center;}
-    .logo img{max-height:50px;width:auto;}
+    .logo img{max-height:100px;width:auto;}
     .nav-menu{display:flex;gap:2rem;align-items:center;}
     .nav-menu a{color:#374151;text-decoration:none;font-weight:500;padding:0.5rem 1rem;display:flex;align-items:center;gap:0.5rem;}
     .nav-menu a:hover{color:var(--primary);}
@@ -352,9 +363,9 @@ PHP;
             file_put_contents($config_path, $config_content);
 
             $theme_data = [
-                'primary'      => $new_primary   ?: '#2563eb',
-                'primary-dark' => $new_primary_d ?: '#1d4ed8',
-                'accent'       => $new_accent    ?: '#10b981',
+                'primary'      => $new_primary   ?: '#a855f7',
+                'primary-dark' => $new_primary_d ?: '#7e22ce',
+                'accent'       => $new_accent    ?: '#2563eb',
             ];
             file_put_contents(__DIR__ . '/.theme.json', json_encode($theme_data, JSON_PRETTY_PRINT));
 
@@ -373,7 +384,7 @@ PHP;
     }
 
     if ($action === 'export_all') {
-        $zip_name = 'litecard-cms-full-' . date('Y-m-d-H-i-s') . '.zip';
+        $zip_name = 'spider-cms-full-' . date('Y-m-d-H-i-s') . '.zip';
         $zip_file = sys_get_temp_dir() . '/' . $zip_name;
 
         $zip = new ZipArchive();
@@ -440,7 +451,7 @@ if ($edit_slug && file_exists($f = PAGES_DIR . '/' . $edit_slug . '.php')) {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Panel administracyjny</title>
+    <title>Panel administracyjny – SpiderCMS</title>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css">
     <script src="https://cdnjs.cloudflare.com/ajax/libs/tinymce/7.8.0/tinymce.min.js"></script>
     <script>
@@ -459,25 +470,29 @@ if ($edit_slug && file_exists($f = PAGES_DIR . '/' . $edit_slug . '.php')) {
     </script>
     <style>
         :root {
-            --primary: <?= htmlspecialchars($theme['primary'] ?? '#2563eb') ?>;
-            --primary-dark: <?= htmlspecialchars($theme['primary-dark'] ?? '#1d4ed8') ?>;
-            --accent: <?= htmlspecialchars($theme['accent'] ?? '#10b981') ?>;
+            --primary: <?= htmlspecialchars($theme['primary'] ?? '#a855f7') ?>;
+            --primary-dark: <?= htmlspecialchars($theme['primary-dark'] ?? '#7e22ce') ?>;
+            --accent: <?= htmlspecialchars($theme['accent'] ?? '#2563eb') ?>;
             --success: #10b981;
             --success-dark: #059669;
             --danger: #ef4444;
-            --gray-50: #f9fafb;
-            --gray-100: #f3f4f6;
-            --gray-200: #e5e7eb;
+            --gray-50: #0f172a;   /* Ciemne tło Tech/Slate 900 */
+            --gray-100: #1e293b;  /* Kontenery Slate 800 */
+            --gray-200: #334155;  /* Ramki Slate 700 */
             --sidebar: 260px;
-            --menu-color: #8b5cf6;
-            --settings-color: #f59e0b;
-            --about-color: #ec4899;
+            --menu-color: #c084fc;
+            --settings-color: #60a5fa;
+            --about-color: #f472b6;
         }
         * { margin:0; padding:0; box-sizing:border-box; }
-        body { font-family:system-ui,sans-serif; background:var(--gray-50); color:#111827; min-height:100vh; display:flex; }
-        #sidebar { width:var(--sidebar); background:white; border-right:1px solid var(--gray-200); height:100vh; position:fixed; overflow-y:auto; }
-        #sidebar-header { padding:1.5rem 1.4rem; font-size:1.45rem; font-weight:700; color:var(--primary); border-bottom:1px solid var(--gray-200); }
-        #sidebar a { display:flex; align-items:center; gap:0.8rem; padding:0.95rem 1.4rem; color:#4b5563; text-decoration:none; transition:0.15s; }
+        body { font-family:system-ui,sans-serif; background:var(--gray-50); color:#f8fafc; min-height:100vh; display:flex; }
+        #sidebar { width:var(--sidebar); background:#0f172a; border-right:1px solid var(--gray-200); height:100vh; position:fixed; overflow-y:auto; }
+        
+        /* Styl nagłówka w sidebarze z logo */
+        #sidebar-header { padding:1.2rem 1.4rem; font-size:1.45rem; font-weight:700; color:var(--primary); border-bottom:1px solid var(--gray-200); display:flex; align-items:center; gap:0.6rem; }
+        #sidebar-header img { max-height:50px; width:auto; border-radius:4px; display:inline-block; }
+        
+        #sidebar a { display:flex; align-items:center; gap:0.8rem; padding:0.95rem 1.4rem; color:#94a3b8; text-decoration:none; transition:0.15s; }
         #sidebar a:hover, #sidebar a.active { background:var(--gray-100); color:var(--primary); }
         #sidebar .menu-tab    { color:var(--menu-color); }
         #sidebar .settings-tab { color:var(--settings-color); }
@@ -486,20 +501,22 @@ if ($edit_slug && file_exists($f = PAGES_DIR . '/' . $edit_slug . '.php')) {
         #sidebar .settings-tab.active,
         #sidebar .about-tab.active { background:var(--gray-100); font-weight:600; }
         #main { margin-left:var(--sidebar); flex:1; padding:2rem 2.4rem; }
-        header { background:white; padding:1.2rem 2rem; border-bottom:1px solid var(--gray-200); display:flex; justify-content:space-between; align-items:center; border-radius:10px; margin-bottom:1.8rem; box-shadow:0 2px 10px rgba(0,0,0,0.04); }
+        header { background:var(--gray-100); padding:1.2rem 2rem; border-bottom:1px solid var(--gray-200); display:flex; justify-content:space-between; align-items:center; border-radius:10px; margin-bottom:1.8rem; box-shadow:0 4px 14px rgba(0,0,0,0.2); }
         header h1 { font-size:1.6rem; margin:0; }
-        .card { background:white; border-radius:10px; box-shadow:0 3px 16px rgba(0,0,0,0.05); padding:1.7rem 2rem; margin-bottom:1.8rem; }
-        label { display:block; margin:1.2rem 0 0.4rem; font-weight:500; color:#4b5563; }
-        input[type="text"], input[type="color"], input[type="file"] { width:100%; padding:0.75rem 1rem; border:1px solid #d1d5db; border-radius:6px; }
-        input[type="color"] { padding:0.4rem; height:2.8rem; width:4rem; }
-        .toast { position:fixed; top:1.2rem; right:1.2rem; padding:0.9rem 1.5rem; border-radius:8px; color:white; font-weight:500; z-index:1000; box-shadow:0 5px 18px rgba(0,0,0,0.16); animation:toast-in .35s, toast-out .35s 4s forwards; }
+        .card { background:var(--gray-100); border-radius:10px; box-shadow:0 4px 16px rgba(0,0,0,0.2); padding:1.7rem 2rem; margin-bottom:1.8rem; border:1px solid var(--gray-200); }
+        label { display:block; margin:1.2rem 0 0.4rem; font-weight:500; color:#94a3b8; }
+        input[type="text"], input[type="file"] { width:100%; padding:0.75rem 1rem; border:1px solid var(--gray-200); background:#0f172a; color:#f8fafc; border-radius:6px; }
+        input[type="text"]:focus{ outline:2px solid var(--primary); }
+        input[type="color"] { padding:0.4rem; height:2.8rem; width:4rem; border:1px solid var(--gray-200); background:none; border-radius:6px; cursor:pointer; }
+        .toast { position:fixed; top:1.2rem; right:1.2rem; padding:0.9rem 1.5rem; border-radius:8px; color:white; font-weight:500; z-index:1000; box-shadow:0 5px 18px rgba(0,0,0,0.3); animation:toast-in .35s, toast-out .35s 4s forwards; }
         .toast.success { background:var(--success); }
         .toast.error   { background:var(--danger); }
         @keyframes toast-in  { from { opacity:0; transform:translateY(-14px); } to { opacity:1; transform:translateY(0); } }
         table { width:100%; border-collapse:collapse; margin-top:0.8rem; }
         th, td { padding:0.9rem 1.1rem; text-align:left; border-bottom:1px solid var(--gray-200); }
-        th { background:var(--gray-100); font-weight:600; }
-        tr:hover { background:var(--gray-50); }
+        th { background:var(--gray-50); color:#94a3b8; font-weight:600; }
+        tr:hover { background:rgba(255,255,255,0.02); }
+        code { background:#0f172a; padding:0.2rem 0.4rem; border-radius:4px; color:#c084fc; }
 
         .btn {
             padding: 0.55rem 1.1rem !important;
@@ -511,7 +528,6 @@ if ($edit_slug && file_exists($f = PAGES_DIR . '/' . $edit_slug . '.php')) {
             align-items: center !important;
             gap: 0.45rem !important;
             transition: 0.14s !important;
-            text-shadow: 0 0 1px rgba(0,0,0,0.3) !important;
         }
 
         .btn-view     { background: #10b981 !important; }
@@ -519,7 +535,6 @@ if ($edit_slug && file_exists($f = PAGES_DIR . '/' . $edit_slug . '.php')) {
         .btn-edit     { background: #3b82f6 !important; }
         .btn-delete   { background: #ef4444 !important; }
         .btn-export   { background: #8b5cf6 !important; }
-
         .btn i { color: white !important; }
 
         button[type="submit"] {
@@ -530,6 +545,7 @@ if ($edit_slug && file_exists($f = PAGES_DIR . '/' . $edit_slug . '.php')) {
             border-radius: 6px !important;
             font-weight: 600 !important;
             cursor: pointer !important;
+            transition: background 0.15s;
         }
         button[type="submit"]:hover { background: var(--primary-dark) !important; }
 
@@ -543,10 +559,11 @@ if ($edit_slug && file_exists($f = PAGES_DIR . '/' . $edit_slug . '.php')) {
             display: inline-flex !important;
             align-items: center !important;
             gap: 0.6rem !important;
-            margin-top: 2rem !important;
+            margin-top: 1rem !important;
             border: none !important;
             cursor: pointer !important;
             box-shadow: 0 4px 12px rgba(5,150,105,0.3) !important;
+            transition: all 0.2s;
         }
         .btn-full-export:hover {
             background: #047857 !important;
@@ -555,11 +572,9 @@ if ($edit_slug && file_exists($f = PAGES_DIR . '/' . $edit_slug . '.php')) {
         }
 
         .menu-row { display:grid; grid-template-columns:1fr 1fr 1fr; gap:1rem; margin-bottom:1rem; align-items:flex-end; }
-        .menu-row label { font-size:0.9rem; margin-bottom:0.3rem; display:block; }
         .color-preview { display:flex; align-items:center; gap:1rem; margin-top:0.4rem; }
-        .color-preview span { font-family:monospace; font-size:0.95rem; color:#4b5563; }
+        .color-preview span { font-family:monospace; font-size:0.95rem; color:#94a3b8; }
 
-        /* Dashboard – proste karty */
         .dashboard-grid {
             display: grid;
             grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
@@ -567,11 +582,12 @@ if ($edit_slug && file_exists($f = PAGES_DIR . '/' . $edit_slug . '.php')) {
             margin-top: 1.5rem;
         }
         .dash-card {
-            background: white;
+            background: var(--gray-100);
             border-radius: 10px;
-            box-shadow: 0 3px 12px rgba(0,0,0,0.08);
+            box-shadow: 0 4px 12px rgba(0,0,0,0.15);
             padding: 1.5rem;
             text-align: center;
+            border:1px solid var(--gray-200);
         }
         .dash-card h3 {
             margin: 0 0 1rem;
@@ -589,7 +605,12 @@ if ($edit_slug && file_exists($f = PAGES_DIR . '/' . $edit_slug . '.php')) {
 <body>
 
 <aside id="sidebar">
-    <div id="sidebar-header">Spider CMS</div>
+    <div id="sidebar-header">
+        <?php if ($logo_url): ?>
+            <img src="<?= htmlspecialchars($logo_url) ?>" alt="Ikona">
+        <?php endif; ?>
+        SpiderCMS
+    </div>
     <nav>
         <a href="/" target="_blank"><i class="fa-solid fa-arrow-up-right-from-square"></i> Strona główna</a>
         <a href="admin.php?tab=dashboard" class="<?= $tab === 'dashboard' ? 'active' : '' ?>"><i class="fa-solid fa-gauge"></i> Dashboard</a>
@@ -633,7 +654,7 @@ if ($edit_slug && file_exists($f = PAGES_DIR . '/' . $edit_slug . '.php')) {
             <div class="dash-card">
                 <h3>Liczba stron</h3>
                 <div class="dash-number"><?= count($pages) ?></div>
-                <p style="color:#6b7280;">w tym strona główna</p>
+                <p style="color:#94a3b8;">w tym strona główna</p>
             </div>
 
             <div class="dash-card">
@@ -649,7 +670,7 @@ if ($edit_slug && file_exists($f = PAGES_DIR . '/' . $edit_slug . '.php')) {
                     }
                 }
                 ?>
-                <div style="font-size:1.3rem; font-weight:600; color:#374151;"><?= $last_modified ?></div>
+                <div style="font-size:1.3rem; font-weight:600; color:#f8fafc;"><?= $last_modified ?></div>
             </div>
 
             <div class="dash-card">
@@ -657,19 +678,19 @@ if ($edit_slug && file_exists($f = PAGES_DIR . '/' . $edit_slug . '.php')) {
                 <div style="font-size:1.4rem; margin:0.8rem 0;">
                     <?= $menu_enabled ? '<span style="color:var(--success);">WŁĄCZONE</span>' : '<span style="color:var(--danger);">WYŁĄCZONE</span>' ?>
                 </div>
-                <p style="color:#6b7280;"><?= count($menu_items) ?> pozycji</p>
+                <p style="color:#94a3b8;"><?= count($menu_items) ?> pozycji</p>
             </div>
 
             <div class="dash-card">
                 <h3>Szybkie akcje</h3>
                 <div style="margin-top:1rem; display:flex; flex-direction:column; gap:0.8rem;">
-                    <a href="admin.php?tab=strony" class="btn btn-view" style="text-align:center;">
+                    <a href="admin.php?tab=strony" class="btn btn-view" style="text-align:center; justify-content:center;">
                         <i class="fa-solid fa-plus"></i> Dodaj nową stronę
                     </a>
-                    <a href="admin.php?tab=ustawienia" class="btn btn-edit" style="text-align:center;">
+                    <a href="admin.php?tab=ustawienia" class="btn btn-edit" style="text-align:center; justify-content:center;">
                         <i class="fa-solid fa-palette"></i> Zmień kolory / logo
                     </a>
-                    <a href="/" target="_blank" class="btn btn-export" style="text-align:center;">
+                    <a href="/" target="_blank" class="btn btn-export" style="text-align:center; justify-content:center;">
                         <i class="fa-solid fa-eye"></i> Podgląd witryny
                     </a>
                 </div>
@@ -685,75 +706,66 @@ if ($edit_slug && file_exists($f = PAGES_DIR . '/' . $edit_slug . '.php')) {
                 <input type="hidden" name="action" value="save_settings">
 
                 <label for="site_name">Nazwa witryny (tekstowa wersja logo – fallback)</label>
-                <input type="text" id="site_name" name="site_name" value="<?= htmlspecialchars(SITE_NAME) ?>" required placeholder="np. Spider CMS">
+                <input type="text" id="site_name" name="site_name" value="<?= htmlspecialchars(SITE_NAME) ?>" required placeholder="np. SpiderCMS">
 
-                <div style="margin:2.5rem 0 1.5rem; font-weight:600; color:#6b7280;">Główne kolory</div>
+                <div style="margin:2.5rem 0 1.5rem; font-weight:600; color:#94a3b8;">Główne kolory</div>
 
                 <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap:1.5rem;">
                     <div>
                         <label for="primary">Kolor główny (--primary)</label>
                         <div class="color-preview">
-                            <input type="color" id="primary" name="primary" value="<?= htmlspecialchars($theme['primary'] ?? '#2563eb') ?>">
-                            <span><?= htmlspecialchars($theme['primary'] ?? '#2563eb') ?></span>
+                            <input type="color" id="primary" name="primary" value="<?= htmlspecialchars($theme['primary'] ?? '#a855f7') ?>">
+                            <span><?= htmlspecialchars($theme['primary'] ?? '#a855f7') ?></span>
                         </div>
                     </div>
 
                     <div>
                         <label for="primary_dark">Kolor główny ciemny (--primary-dark)</label>
                         <div class="color-preview">
-                            <input type="color" id="primary_dark" name="primary_dark" value="<?= htmlspecialchars($theme['primary-dark'] ?? '#1d4ed8') ?>">
-                            <span><?= htmlspecialchars($theme['primary-dark'] ?? '#1d4ed8') ?></span>
+                            <input type="color" id="primary_dark" name="primary_dark" value="<?= htmlspecialchars($theme['primary-dark'] ?? '#7e22ce') ?>">
+                            <span><?= htmlspecialchars($theme['primary-dark'] ?? '#7e22ce') ?></span>
                         </div>
                     </div>
 
                     <div>
                         <label for="accent">Kolor akcentujący (--accent)</label>
                         <div class="color-preview">
-                            <input type="color" id="accent" name="accent" value="<?= htmlspecialchars($theme['accent'] ?? '#10b981') ?>">
-                            <span><?= htmlspecialchars($theme['accent'] ?? '#10b981') ?></span>
+                            <input type="color" id="accent" name="accent" value="<?= htmlspecialchars($theme['accent'] ?? '#2563eb') ?>">
+                            <span><?= htmlspecialchars($theme['accent'] ?? '#2563eb') ?></span>
                         </div>
                     </div>
                 </div>
 
                 <div style="margin-top:3rem;">
                     <label for="logo_upload">Logo witryny (zamiast nazwy tekstowej po lewej)</label>
-                    <input type="file" id="logo_upload" name="logo" accept="image/png,image/jpeg,image/svg+xml,image/gif" style="width:100%; padding:0.8rem; border:1px solid #d1d5db; border-radius:6px;">
+                    <input type="file" id="logo_upload" name="logo" accept="image/png,image/jpeg,image/svg+xml,image/gif" style="width:100%; padding:0.8rem; border:1px solid var(--gray-200); background:#0f172a;">
 
-                    <p style="margin:1rem 0 0.5rem; color:#6b7280; font-size:0.95rem;">lub wklej bezpośredni URL do obrazka:</p>
-                    <input type="text" name="logo_url" placeholder="https://example.com/logo.png" value="<?= htmlspecialchars($logo_url) ?>" style="width:100%; padding:0.75rem 1rem; border:1px solid #d1d5db; border-radius:6px;">
+                    <p style="margin:1rem 0 0.5rem; color:#94a3b8; font-size:0.95rem;">lub wklej bezpośredni URL do obrazka:</p>
+                    <input type="text" name="logo_url" placeholder="https://example.com/logo.png" value="<?= htmlspecialchars($logo_url) ?>">
 
                     <?php if ($logo_url): ?>
                         <div style="margin-top:1.5rem;">
                             <strong>Aktualne logo:</strong><br>
-                            <img src="<?= htmlspecialchars($logo_url) ?>" alt="Logo witryny" style="max-height:120px; margin-top:0.5rem; border:1px solid #e5e7eb; border-radius:8px;">
+                            <img src="<?= htmlspecialchars($logo_url) ?>" alt="Logo witryny" style="max-height:120px; margin-top:0.5rem; border:1px solid var(--gray-200); border-radius:8px;">
                         </div>
                     <?php endif; ?>
                 </div>
 
-				<form method="post" enctype="multipart/form-data">
-					<input type="hidden" name="action" value="save_settings">
-
-					<!-- wszystkie pola ustawień -->
-
-					<div style="margin-top:3rem; text-align:center;">
-						<button type="submit">
-							<i class="fa-solid fa-floppy-disk"></i> Zapisz wszystkie ustawienia
-						</button>
-					</div>
-				</form>
-
-				<!-- DRUGI FORMULARZ – POZA PIERWSZYM -->
-				<form method="post" style="margin-top:1.5rem; text-align:center;">
-					<input type="hidden" name="action" value="export_all">
-					<button type="submit" class="btn-full-export">
-						<i class="fa-solid fa-download"></i> Eksport całej witryny (ZIP)
-					</button>
-				</form>
-
-                <p style="margin-top:2rem; color:#6b7280; font-size:0.95rem; text-align:center;">
-                    Po zapisaniu odśwież stronę główną (Ctrl + F5), aby zobaczyć zmiany.
-                </p>
+                <div style="margin-top:3rem; text-align:center;">
+                    <button type="submit">
+                        <i class="fa-solid fa-floppy-disk"></i> Zapisz wszystkie ustawienia
+                    </button>
+                </div>
             </form>
+            <form method="post" style="margin-top:2rem; text-align:center; border-top: 1px solid var(--gray-200); padding-top: 1.5rem;">
+                <input type="hidden" name="action" value="export_all">
+                <button type="submit" class="btn-full-export">
+                    <i class="fa-solid fa-download"></i> Eksport całej witryny (ZIP)
+                </button>
+            </form>
+            <p style="margin-top:2rem; color:#6b7280; font-size:0.95rem; text-align:center;">
+                Po zapisaniu odśwież stronę główną (Ctrl + F5), aby zobaczyć zmiany w pamięci podręcznej.
+            </p>
         </div>
 
     <?php elseif ($tab === 'menu'): ?>
@@ -764,18 +776,18 @@ if ($edit_slug && file_exists($f = PAGES_DIR . '/' . $edit_slug . '.php')) {
             <form method="post">
                 <input type="hidden" name="action" value="save_menu">
 
-                <label style="display:flex; align-items:center; gap:0.8rem; font-size:1.1rem; margin:1.8rem 0 1.2rem;">
+                <label style="display:flex; align-items:center; gap:0.8rem; font-size:1.1rem; margin:1.8rem 0 1.2rem; color:#f8fafc;">
                     <input type="checkbox" name="menu_enabled" <?= $menu_enabled ? 'checked' : '' ?> style="width:auto; transform:scale(1.3);">
                     <strong>Włącz górne menu na wszystkich stronach</strong>
                 </label>
 
-                <div style="margin:2.5rem 0 1rem; font-weight:600; color:#6b7280;">Pozycje menu (maksymalnie 8)</div>
+                <div style="margin:2.5rem 0 1rem; font-weight:600; color:#94a3b8;">Pozycje menu (maksymalnie 8)</div>
 
                 <div id="menu-items">
                     <?php for ($i = 0; $i < 8; $i++):
                         $item = $menu_items[$i] ?? ['label' => '', 'url' => '', 'icon' => ''];
                     ?>
-                    <div class="menu-row" style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:1rem; margin-bottom:1rem; align-items:flex-end;">
+                    <div class="menu-row">
                         <div>
                             <label style="font-size:0.9rem; margin-bottom:0.3rem; display:block;">Nazwa / tekst</label>
                             <input type="text" name="menu_label[]" placeholder="np. O nas" value="<?= htmlspecialchars($item['label'] ?? '') ?>">
@@ -788,7 +800,7 @@ if ($edit_slug && file_exists($f = PAGES_DIR . '/' . $edit_slug . '.php')) {
 
                         <div>
                             <label style="font-size:0.9rem; margin-bottom:0.3rem; display:block;">Ikona / URL obrazka</label>
-                            <input type="text" name="menu_icon[]" placeholder="https://...png / jpg / svg lub fa-solid fa-home" value="<?= htmlspecialchars($item['icon'] ?? '') ?>">
+                            <input type="text" name="menu_icon[]" placeholder="fa-solid fa-home lub URL" value="<?= htmlspecialchars($item['icon'] ?? '') ?>">
                         </div>
                     </div>
                     <?php endfor; ?>
@@ -798,11 +810,11 @@ if ($edit_slug && file_exists($f = PAGES_DIR . '/' . $edit_slug . '.php')) {
                     <button type="submit"><i class="fa-solid fa-save"></i> Zapisz konfigurację menu</button>
                 </div>
 
-                <p style="margin-top:1.5rem; color:#6b7280; font-size:0.95rem;">
+                <p style="margin-top:1.5rem; color:#94a3b8; font-size:0.95rem; line-height: 1.5;">
                     W polu „Ikona / URL obrazka” możesz wpisać:<br>
                     • bezpośredni link do obrazka (png / jpg / svg / gif)<br>
-                    • klasę Font Awesome (np. fa-solid fa-home)<br>
-                    • jeśli puste → wyświetli się sama nazwa
+                    • klasę Font Awesome (np. `fa-solid fa-home`) <br>
+                    • jeśli puste → wyświetli się sama nazwa tekstowa
                 </p>
             </form>
         </div>
@@ -816,53 +828,32 @@ if ($edit_slug && file_exists($f = PAGES_DIR . '/' . $edit_slug . '.php')) {
             </h2>
 
             <p style="margin:1.5rem 0; line-height:1.7;">
-                <strong>Spider CMS</strong> to lekki, plikowy system zarządzania treścią stworzony specjalnie z myślą o prostocie i szybkości.
+                <strong>SpiderCMS</strong> to ultra-lekki, plikowy system zarządzania treścią (Flat-File) stworzony z myślą o prostocie, bezkompromisowej wydajności i minimalistycznej architekturze.
             </p>
 
-            <ul style="list-style: none; padding-left: 0; line-height: 2;">
-                <li><i class="fa-solid fa-check" style="color:var(--success); margin-right:0.8rem;"></i>Zero bazy danych – wszystko w plikach</li>
-                <li><i class="fa-solid fa-check" style="color:var(--success); margin-right:0.8rem;"></i>Edycja kodu HTML/CSS/PHP wprost w przeglądarce</li>
-                <li><i class="fa-solid fa-check" style="color:var(--success); margin-right:0.8rem;"></i>Dynamiczne logo i kolory zapisywane w plikach JSON</li>
-                <li><i class="fa-solid fa-check" style="color:var(--success); margin-right:0.8rem;"></i>Proste płaskie menu nawigacyjne</li>
-                <li><i class="fa-solid fa-check" style="color:var(--success); margin-right:0.8rem;"></i>Eksport całej witryny jednym kliknięciem (ZIP)</li>
+            <ul style="list-style: none; padding-left: 0; line-height: 2.2;">
+                <li><i class="fa-solid fa-check" style="color:var(--success); margin-right:0.8rem;"></i><strong>Zero baz danych SQL</strong> – kompletna konfiguracja i struktura w plikach systemowych</li>
+                <li><i class="fa-solid fa-check" style="color:var(--success); margin-right:0.8rem;"></i>Szybka edycja i kompilacja kodu stron bezpośrednio z panelu</li>
+                <li><i class="fa-solid fa-check" style="color:var(--success); margin-right:0.8rem;"></i>Dynamiczne zarządzanie motywem za pomocą asynchronicznych struktur JSON</li>
+                <li><i class="fa-solid fa-check" style="color:var(--success); margin-right:0.8rem;"></i>Błyskawiczny, natywny eksport całej witryny do spakowanego archiwum ZIP</li>
             </ul>
 
-            <p style="margin-top:2rem; font-style:italic; color:#6b7280;">
-                Projekt powstał jako alternatywa dla ciężkich CMS-ów – idealny do małych i średnich stron firmowych, portfolio, landing page.
+            <p style="margin-top:2rem; font-style:italic; color:#94a3b8;">
+                Idealna, lekka alternatywa dla przeładowanych frameworków i systemów – perfekcyjna pod landing page, wizytówki oraz witryny firmowe.
             </p>
 
-            <div style="margin-top:2rem; text-align:center;">
-                <p style="color:#6b7280;">Wersja: 1.0 | Autor: [Kamil Paprota]</p>
+            <div style="margin-top:2.5rem; text-align:center; border-top:1px solid var(--gray-200); padding-top:1.5rem;">
+                <p style="color:#94a3b8;">Wersja: 1.1 Cyber-Update | Autor: [Kamil Paprota]</p>
                 <p style="color:#6b7280;">© <?= date('Y') ?> SpiderCMS – wszystkie prawa zastrzeżone</p>
             </div>
         </div>
 
     <?php else: ?>
-
-        <div class="card">
-            <h2>Nowa strona</h2>
-            <form method="post">
-                <input type="hidden" name="action" value="create">
-                <label>Slug (adres URL)</label>
-                <input type="text" name="slug" required pattern="[a-z0-9\-_]+" placeholder="np. kontakt" title="litery, cyfry, -, _">
-
-                <label>Tytuł strony</label>
-                <input type="text" name="title" required placeholder="np. Kontakt">
-
-                <label>Treść strony</label>
-                <textarea name="content" class="editor"><p>Wpisz zawartość...</p></textarea>
-
-                <div style="margin-top:1.6rem;">
-                    <button type="submit"><i class="fa-solid fa-plus"></i> Utwórz stronę</button>
-                </div>
-            </form>
-        </div>
-
         <div class="card">
             <h2>Twoje strony (<?= count($pages) ?>)</h2>
 
             <?php if (empty($pages)): ?>
-                <p style="color:#6b7280;padding:1rem 0;">Brak stron – strona główna została utworzona automatycznie.</p>
+                <p style="color:#94a3b8;padding:1rem 0;">Brak stron – strona główna została utworzona automatycznie.</p>
             <?php else: ?>
             <table>
                 <thead>
@@ -914,6 +905,25 @@ if ($edit_slug && file_exists($f = PAGES_DIR . '/' . $edit_slug . '.php')) {
             </table>
             <?php endif; ?>
         </div>
+		
+        <div class="card">
+            <h2>Nowa strona</h2>
+            <form method="post">
+                <input type="hidden" name="action" value="create">
+                <label>Slug (adres URL)</label>
+                <input type="text" name="slug" required pattern="[a-z0-9\-_]+" placeholder="np. kontakt" title="litery, cyfry, -, _">
+
+                <label>Tytuł strony</label>
+                <input type="text" name="title" required placeholder="np. Kontakt">
+
+                <label>Treść strony</label>
+                <textarea name="content" class="editor"><p>Wpisz zawartość...</p></textarea>
+
+                <div style="margin-top:1.6rem;">
+                    <button type="submit"><i class="fa-solid fa-plus"></i> Utwórz stronę</button>
+                </div>
+            </form>
+        </div>
 
         <?php if ($edit_slug): ?>
         <div class="card">
@@ -925,7 +935,7 @@ if ($edit_slug && file_exists($f = PAGES_DIR . '/' . $edit_slug . '.php')) {
                 <textarea name="content" class="editor"><?= htmlspecialchars($edit_content) ?></textarea>
                 <div style="margin-top:1.6rem;">
                     <button type="submit"><i class="fa-solid fa-floppy-disk"></i> Zapisz zmiany</button>
-                    <a href="admin.php" style="margin-left:1.2rem;color:#6b7280;text-decoration:none;">Anuluj</a>
+                    <a href="admin.php" style="margin-left:1.2rem;color:#94a3b8;text-decoration:none;">Anuluj</a>
                 </div>
             </form>
         </div>
