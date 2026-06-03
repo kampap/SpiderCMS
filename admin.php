@@ -1,5 +1,5 @@
 <?php
-// admin.php – panel administracyjny LiteCard CMS
+// admin.php – panel administracyjny Spider CMS
 // Dodana strona startowa (dashboard) po zalogowaniu
 // Menu wróciło do prostej wersji (bez submenu)
 // Wersja: marzec 2026
@@ -589,7 +589,7 @@ if ($edit_slug && file_exists($f = PAGES_DIR . '/' . $edit_slug . '.php')) {
 <body>
 
 <aside id="sidebar">
-    <div id="sidebar-header">Lite CMS</div>
+    <div id="sidebar-header">Spider CMS</div>
     <nav>
         <a href="/" target="_blank"><i class="fa-solid fa-arrow-up-right-from-square"></i> Strona główna</a>
         <a href="admin.php?tab=dashboard" class="<?= $tab === 'dashboard' ? 'active' : '' ?>"><i class="fa-solid fa-gauge"></i> Dashboard</a>
@@ -685,7 +685,7 @@ if ($edit_slug && file_exists($f = PAGES_DIR . '/' . $edit_slug . '.php')) {
                 <input type="hidden" name="action" value="save_settings">
 
                 <label for="site_name">Nazwa witryny (tekstowa wersja logo – fallback)</label>
-                <input type="text" id="site_name" name="site_name" value="<?= htmlspecialchars(SITE_NAME) ?>" required placeholder="np. LiteCard CMS">
+                <input type="text" id="site_name" name="site_name" value="<?= htmlspecialchars(SITE_NAME) ?>" required placeholder="np. Spider CMS">
 
                 <div style="margin:2.5rem 0 1.5rem; font-weight:600; color:#6b7280;">Główne kolory</div>
 
@@ -816,7 +816,7 @@ if ($edit_slug && file_exists($f = PAGES_DIR . '/' . $edit_slug . '.php')) {
             </h2>
 
             <p style="margin:1.5rem 0; line-height:1.7;">
-                <strong>LiteCard CMS</strong> to lekki, plikowy system zarządzania treścią stworzony specjalnie z myślą o prostocie i szybkości.
+                <strong>Spider CMS</strong> to lekki, plikowy system zarządzania treścią stworzony specjalnie z myślą o prostocie i szybkości.
             </p>
 
             <ul style="list-style: none; padding-left: 0; line-height: 2;">
@@ -833,7 +833,7 @@ if ($edit_slug && file_exists($f = PAGES_DIR . '/' . $edit_slug . '.php')) {
 
             <div style="margin-top:2rem; text-align:center;">
                 <p style="color:#6b7280;">Wersja: 1.0 | Autor: [Kamil Paprota]</p>
-                <p style="color:#6b7280;">© <?= date('Y') ?> LiteCard CMS – wszystkie prawa zastrzeżone</p>
+                <p style="color:#6b7280;">© <?= date('Y') ?> SpiderCMS – wszystkie prawa zastrzeżone</p>
             </div>
         </div>
 
