@@ -1,4 +1,4 @@
-LiteCard CMS to lekki, plikowy system zarządzania treścią stworzony specjalnie z myślą o prostocie i szybkości.
+SpiderCMS to lekki, plikowy system zarządzania treścią stworzony specjalnie z myślą o prostocie i szybkości.
 
 1. Zero bazy danych – wszystko w plikach
 2. Edycja kodu HTML/CSS/PHP wprost w przeglądarce
