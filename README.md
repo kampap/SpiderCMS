@@ -10,6 +10,6 @@ Projekt powstał jako alternatywa dla ciężkich CMS-ów – idealny do małych 
 
 1. Pierwsze logowanie
 Logowanie do systemu CMS jest zabezpieczone hasłem "admin2026".
-Zalecana jest zmiana hasła za pomocą narzędzia dostępnym pod adresem: https://argon2.online/
-Podajemy swoje hasło i generujemy hash i wklejamy go do pliku .admin_hash
+Zalecana jest zmiana hasła za pomocą narzędzia dostępnym pod adresem: https://argon2.online/.
+Podajemy swoje hasło i generujemy hash i wklejamy go do pliku .admin_hash.
 Od tej pory ustawione jest nowe hasło do panelu CMS.
