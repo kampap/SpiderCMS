@@ -1,5 +1,7 @@
 <?php
-// Globalny plik reprezentujący stopkę serwisu generowany przez SpiderCMS
+if (!file_exists(__DIR__ . '/.footer_enabled')) {
+    return;
+}
 $f_data = file_exists(__DIR__ . '/.footer.json') ? json_decode(file_get_contents(__DIR__ . '/.footer.json'), true) : [];
 ?>
 <footer class="site-footer">

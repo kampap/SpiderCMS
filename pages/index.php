@@ -121,9 +121,9 @@ HTML;
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css">
   <style>
     :root {
-      --primary: #578000;
-      --primary-dark: #86cd79;
-      --accent: #000000;
+      --primary: #ff6666;
+      --primary-dark: #ffffff;
+      --accent: #ff0000;
       --gray50: #f9fafb;
       --gray800: #1f2937;
     }

@@ -1,11 +1,14 @@
 <?php
-// admin.php – panel administracyjny SpiderCMS
+// ======================================================================
+// public/admin.php
+// SpiderCMS – Panel administracyjny
 // Dostosowano styl wizualny do mrocznego, neonowego logo systemu
 // Dodano wyświetlanie logo przy napisach SpiderCMS (Sidebar oraz Ekran Logowania)
 // Naprawiono strukturę formularzy (zapis ustawień oraz eksport ZIP działają niezależnie)
 // NAPRAWIONO: Dodano pełną obsługę, formularz oraz dynamiczny szablon generowania stopki z poprawną ścieżką
 // DYNAMICZNA STOPKA: Zapis stopki aktualizuje teraz globalny plik footer.php oraz automatycznie naprawia istniejące podstrony!
 // Wersja: czerwiec 2026
+// ======================================================================
 
 session_start();
 
@@ -24,7 +27,7 @@ require_once __DIR__ . '/config.php';
 // ----------------------------------------------------------------------
 // BAZOWA ŚCIEŻKA
 // ----------------------------------------------------------------------
-define('BASE_URL', '/litecard-cms/');   // ← zmień jeśli folder nazywa się inaczej
+define('BASE_URL', '/litecard-cms/'); // ← zmień jeśli folder nazywa się inaczej
 
 // ----------------------------------------------------------------------
 // Inicjalizacja zmiennych
@@ -39,16 +42,16 @@ $settings_file = __DIR__ . '/.settings.json';
 $settings = file_exists($settings_file) ? json_decode(file_get_contents($settings_file), true) : [];
 
 // Jako domyślne logo ustawiamy nową grafikę z pająkiem
-$logo_url = $settings['logo'] ?? (BASE_URL . 'assets/images/spider.png');
+$logo_url = $settings['logo'] ?? (BASE_URL . 'assets/images/spidercms-icon.png');
 
 // ----------------------------------------------------------------------
 // Wczytanie kolorów
 // ----------------------------------------------------------------------
 $theme_file = __DIR__ . '/.theme.json';
 $theme = file_exists($theme_file) ? json_decode(file_get_contents($theme_file), true) : [
-    'primary'      => '#a855f7', // Neonowy fiolet (z górnej części pająka)
-    'primary-dark' => '#7e22ce', // Ciemniejszy fiolet do hoverów
-    'accent'       => '#2563eb', // Elektryzujący błękit (z dolnej części pająka)
+    'primary' => '#a855f7',
+    'primary-dark' => '#7e22ce',
+    'accent' => '#2563eb',
 ];
 
 // ----------------------------------------------------------------------
@@ -56,25 +59,24 @@ $theme = file_exists($theme_file) ? json_decode(file_get_contents($theme_file), 
 // ----------------------------------------------------------------------
 $footer_file = __DIR__ . '/.footer.json';
 $footer_data = file_exists($footer_file) ? json_decode(file_get_contents($footer_file), true) : [
-    'copyright'    => '© ' . date('Y') . ' SpiderCMS – wszystkie prawa zastrzeżone.',
-    'about_text'   => 'Ultra-lekki system zarządzania treścią Flat-File.',
-    'col1_title'   => 'Kontakt',
+    'copyright' => '© ' . date('Y') . ' SpiderCMS – wszystkie prawa zastrzeżone.',
+    'about_text' => 'Ultra-lekki system zarządzania treścią Flat-File.',
+    'col1_title' => 'Kontakt',
     'col1_content' => 'Email: kontakt@example.com',
-    'col2_title'   => 'Linki',
+    'col2_title' => 'Linki',
     'col2_content' => '<a href="/polityka-privacy">Polityka prywatności</a>'
 ];
+$footer_enabled = file_exists(__DIR__ . '/.footer_enabled');
 
 // ----------------------------------------------------------------------
 // Funkcja aktualizująca kolory we wszystkich stronach
 // ----------------------------------------------------------------------
 function update_all_pages_colors() {
     global $theme;
-    $primary     = $theme['primary']      ?? '#a855f7';
+    $primary = $theme['primary'] ?? '#a855f7';
     $primary_dark = $theme['primary-dark'] ?? '#7e22ce';
-    $accent      = $theme['accent']       ?? '#2563eb';
-
-    $root_block = ":root {\n      --primary: {$primary};\n      --primary-dark: {$primary_dark};\n      --accent: {$accent};\n      --gray50: #f9fafb;\n      --gray800: #1f2937;\n    }";
-
+    $accent = $theme['accent'] ?? '#2563eb';
+    $root_block = ":root {\n --primary: {$primary};\n --primary-dark: {$primary_dark};\n --accent: {$accent};\n --gray50: #f9fafb;\n --gray800: #1f2937;\n }";
     $updated = 0;
     $files = glob(PAGES_DIR . '/*.php');
     foreach ($files as $file) {
@@ -93,18 +95,15 @@ function update_all_pages_colors() {
 // ----------------------------------------------------------------------
 $hash_file = __DIR__ . '/.admin_hash';
 if (!file_exists($hash_file)) {
-    $default_password = 'admin2026'; // ZMIEŃ TO NATYCHMIAST!
+    $default_password = 'admin2026';
     file_put_contents($hash_file, password_hash($default_password, PASSWORD_ARGON2ID));
     chmod($hash_file, 0600);
 }
 $ADMIN_HASH = trim(file_get_contents($hash_file));
-
 $MAX_LOGIN_ATTEMPTS = 5;
-$BLOCK_DURATION     = 15 * 60;
-
+$BLOCK_DURATION = 15 * 60;
 if (!isset($_SESSION['login_attempts'])) $_SESSION['login_attempts'] = 0;
 if (!isset($_SESSION['login_block_until'])) $_SESSION['login_block_until'] = 0;
-
 if ($_SESSION['login_block_until'] > time()) {
     $remaining = $_SESSION['login_block_until'] - time();
     $minutes = ceil($remaining / 60);
@@ -139,7 +138,6 @@ if (!isset($_SESSION['logged_in']) || $_SESSION['logged_in'] !== true) {
             }
         }
     }
-
     ?>
     <!DOCTYPE html>
     <html lang="pl">
@@ -147,6 +145,7 @@ if (!isset($_SESSION['logged_in']) || $_SESSION['logged_in'] !== true) {
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <title>Logowanie – Panel SpiderCMS</title>
+        <link rel="icon" type="image/png" href="/assets/images/spidercms-icon.png">
         <style>
             body{font-family:system-ui,sans-serif;background:linear-gradient(135deg,#0f172a,#1e293b);display:flex;justify-content:center;align-items:center;min-height:100vh;margin:0;}
             .card{background:#1e293b;padding:2.5rem 2.2rem;border-radius:14px;box-shadow:0 10px 40px rgba(0,0,0,0.4);width:100%;max-width:400px;border:1px solid #334155;color:#f8fafc;}
@@ -195,25 +194,20 @@ $tab = $_GET['tab'] ?? 'dashboard';
 // ----------------------------------------------------------------------
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $action = $_POST['action'] ?? '';
-
     // AKCJA: TWORZENIE STRONY
     if ($action === 'create') {
         $slug = preg_replace('/[^a-z0-9\-_]+/i', '-', trim(strtolower($_POST['slug'] ?? '')));
         $title = trim($_POST['title'] ?? '');
         $content = $_POST['content'] ?? '';
-
         if ($slug && $title) {
             $file = PAGES_DIR . '/' . $slug . '.php';
             if (file_exists($file)) {
                 $toast = ['type'=>'error', 'msg'=>'Taki slug już istnieje'];
             } else {
-                // Składnia NOWDOC (<<<'PHP') chroni wewnętrzne zmienne i tagi przed przedwczesnym parsowaniem
-                // ZMODYFIKOWANO: Cała stopka została wydelegowana do zewnętrznego pliku footer.php za pomocą require_once
                 $template = <<<'PHP'
 <?php
 require_once __DIR__ . '/../config.php';
 require_once __DIR__ . '/../header.php';
-
 $title = '__TITLE__';
 $content = <<<HTML
 __CONTENT__
@@ -260,24 +254,17 @@ HTML;
   </style>
 </head>
 <body>
-
 <?php // Nagłówek wczytany z header.php ?>
-
 <main><?php echo $content; ?></main>
-
-<?php 
+<?php
 // ZMIANA: Zamiast generować stopkę w każdym pliku osobno, wczytujemy globalny plik footer.php
-require_once __DIR__ . '/../footer.php'; 
+require_once __DIR__ . '/../footer.php';
 ?>
-
 </body>
 </html>
 PHP;
-
-                // Bezpieczna zamiana markerów na faktyczne dane
                 $template = str_replace('__TITLE__', addslashes($title), $template);
                 $template = str_replace('__CONTENT__', $content, $template);
-
                 file_put_contents($file, $template);
                 $toast = ['type'=>'success', 'msg'=>"Utworzono stronę /$slug"];
             }
@@ -285,7 +272,6 @@ PHP;
             $toast = ['type'=>'error', 'msg'=>'Slug i tytuł są wymagane'];
         }
     }
-
     // AKCJA: EDYCJA STRONY
     if ($action === 'edit') {
         $slug = trim($_POST['slug'] ?? '');
@@ -304,7 +290,6 @@ PHP;
             $toast = ['type'=>'error', 'msg'=>'Strona nie istnieje'];
         }
     }
-
     // AKCJA: USUWANIE STRONY
     if ($action === 'delete') {
         $slug = trim($_POST['slug'] ?? '');
@@ -319,7 +304,6 @@ PHP;
             }
         }
     }
-
     // AKCJA: ZAPIS MENU
     if ($action === 'save_menu') {
         $enabled = !empty($_POST['menu_enabled']);
@@ -328,13 +312,11 @@ PHP;
         } else {
             @unlink(__DIR__ . '/.menu_enabled');
         }
-
         $items = [];
         foreach (($_POST['menu_label'] ?? []) as $i => $label) {
             $label = trim($label);
-            $url   = trim($_POST['menu_url'][$i] ?? '');
-            $icon  = trim($_POST['menu_icon'][$i] ?? '');
-
+            $url = trim($_POST['menu_url'][$i] ?? '');
+            $icon = trim($_POST['menu_icon'][$i] ?? '');
             if ($label && $url) {
                 $items[] = ['label' => $label, 'url' => $url, 'icon' => $icon];
             }
@@ -344,24 +326,29 @@ PHP;
         header('Location: admin.php?tab=menu');
         exit;
     }
-
     // AKCJA: ZAPIS STOPKI + GENEROWANIE GLOBALNEGO PLIKU FOOTER.PHP + AKTUALIZACJA STARYCH STRON
     if ($action === 'save_footer') {
+        $footer_enabled = !empty($_POST['footer_enabled']);
+        if ($footer_enabled) {
+            file_put_contents(__DIR__ . '/.footer_enabled', '1');
+        } else {
+            @unlink(__DIR__ . '/.footer_enabled');
+        }
+
         $footer_save = [
-            'copyright'    => trim($_POST['footer_copyright'] ?? ''),
-            'about_text'   => trim($_POST['footer_about_text'] ?? ''),
-            'col1_title'   => trim($_POST['footer_col1_title'] ?? ''),
+            'copyright' => trim($_POST['footer_copyright'] ?? ''),
+            'about_text' => trim($_POST['footer_about_text'] ?? ''),
+            'col1_title' => trim($_POST['footer_col1_title'] ?? ''),
             'col1_content' => $_POST['footer_col1_content'] ?? '',
-            'col2_title'   => trim($_POST['footer_col2_title'] ?? ''),
+            'col2_title' => trim($_POST['footer_col2_title'] ?? ''),
             'col2_content' => $_POST['footer_col2_content'] ?? '',
         ];
-        // Zapisujemy bazę JSON
         file_put_contents($footer_file, json_encode($footer_save, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
-
-        // GENERUJEMY NOWY GLOBALNY PLIK footer.php W KATALOGU GŁÓWNYM
         $global_footer_content = <<<'PHP'
 <?php
-// Globalny plik reprezentujący stopkę serwisu generowany przez SpiderCMS
+if (!file_exists(__DIR__ . '/.footer_enabled')) {
+    return;
+}
 $f_data = file_exists(__DIR__ . '/.footer.json') ? json_decode(file_get_contents(__DIR__ . '/.footer.json'), true) : [];
 ?>
 <footer class="site-footer">
@@ -389,15 +376,10 @@ $f_data = file_exists(__DIR__ . '/.footer.json') ? json_decode(file_get_contents
 </footer>
 PHP;
         file_put_contents(__DIR__ . '/footer.php', $global_footer_content);
-
-        // MAPOWANIE I NAPRAWA ISTNIEJĄCYCH STRON (Konwersja na model dynamiczny require_once)
         $pages_files = glob(PAGES_DIR . '/*.php');
         foreach ($pages_files as $p_file) {
             $p_content = file_get_contents($p_file);
-            
-            // Szukamy starej, statycznej struktury stopek <footer class="site-footer">...</footer> i kodu nad nią
             if (strpos($p_content, 'require_once __DIR__ . \'/../footer.php\';') === false) {
-                // Sprytny regex wycina stary blok PHP ładujący plik oraz blok HTML <footer...>...</footer>
                 $pattern = '/<\?php\s*\/\/ NAPRAWIONO ŚCIEŻKĘ.*?\?>\s*<footer class="site-footer">.*?<\/footer>/s';
                 if (preg_match($pattern, $p_content)) {
                     $p_content = preg_replace($pattern, "<?php require_once __DIR__ . '/../footer.php'; ?>", $p_content);
@@ -405,31 +387,25 @@ PHP;
                 }
             }
         }
-
         $toast = ['type' => 'success', 'msg' => 'Zapisano stopkę globalną i pomyślnie zsynchronizowano wszystkie podstrony!'];
         header('Location: admin.php?tab=stopka');
         exit;
     }
-
     // AKCJA: ZAPIS USTAWIEŃ I MOTYWU
     if ($action === 'save_settings') {
         $new_site_name = trim($_POST['site_name'] ?? '');
-        $new_primary   = trim($_POST['primary']   ?? '');
+        $new_primary = trim($_POST['primary'] ?? '');
         $new_primary_d = trim($_POST['primary_dark'] ?? '');
-        $new_accent    = trim($_POST['accent']    ?? '');
-
+        $new_accent = trim($_POST['accent'] ?? '');
         $logo_path = $logo_url;
         $logo_upload = $_FILES['logo'] ?? null;
-
         if ($logo_upload && $logo_upload['error'] === UPLOAD_ERR_OK) {
             $upload_dir = __DIR__ . '/uploads/';
             if (!is_dir($upload_dir)) mkdir($upload_dir, 0755, true);
-
             $ext = strtolower(pathinfo($logo_upload['name'], PATHINFO_EXTENSION));
             if (in_array($ext, ['png','jpg','jpeg','svg','gif'])) {
                 $safe_name = 'logo-' . time() . '.' . $ext;
                 $target_file = $upload_dir . $safe_name;
-
                 if (move_uploaded_file($logo_upload['tmp_name'], $target_file)) {
                     $logo_path = BASE_URL . 'uploads/' . $safe_name;
                 } else {
@@ -441,7 +417,6 @@ PHP;
         } elseif (!empty($_POST['logo_url'])) {
             $logo_path = trim($_POST['logo_url']);
         }
-
         if ($new_site_name === '') {
             $toast = ['type'=>'error', 'msg'=>'Nazwa witryny nie może być pusta'];
         } else {
@@ -453,28 +428,23 @@ PHP;
                 $config_content
             );
             file_put_contents($config_path, $config_content);
-
             $theme_data = [
-                'primary'      => $new_primary   ?: '#a855f7',
+                'primary' => $new_primary ?: '#a855f7',
                 'primary-dark' => $new_primary_d ?: '#7e22ce',
-                'accent'       => $new_accent    ?: '#2563eb',
+                'accent' => $new_accent ?: '#2563eb',
             ];
             file_put_contents(__DIR__ . '/.theme.json', json_encode($theme_data, JSON_PRETTY_PRINT));
-
             $settings['logo'] = $logo_path;
             file_put_contents($settings_file, json_encode($settings, JSON_PRETTY_PRINT));
-
             $updated_pages = update_all_pages_colors();
             header('Location: admin.php?tab=ustawienia');
             exit;
         }
     }
-
     // AKCJA: EKSPORT CAŁOŚCI ZIP
     if ($action === 'export_all') {
         $zip_name = 'spider-cms-full-' . date('Y-m-d-H-i-s') . '.zip';
         $zip_file = sys_get_temp_dir() . '/' . $zip_name;
-
         $zip = new ZipArchive();
         if ($zip->open($zip_file, ZipArchive::CREATE | ZipArchive::OVERWRITE) === TRUE) {
             foreach (glob(__DIR__ . '/*') as $file) {
@@ -492,7 +462,6 @@ PHP;
                 }
             }
             $zip->close();
-
             header('Content-Type: application/zip');
             header('Content-Disposition: attachment; filename="' . $zip_name . '"');
             header('Content-Length: ' . filesize($zip_file));
@@ -508,13 +477,11 @@ PHP;
 // ----------------------------------------------------------------------
 $menu_enabled = file_exists(__DIR__ . '/.menu_enabled');
 $menu_items = json_decode(@file_get_contents(__DIR__ . '/.menu.json') ?: '[]', true);
-
 $pages = [];
 foreach (glob(PAGES_DIR . '/*.php') ?: [] as $f) {
     $slug = basename($f, '.php');
     $pages[] = ['slug' => $slug, 'modified' => date('Y-m-d H:i', filemtime($f))];
 }
-
 $edit_slug = $_GET['edit'] ?? '';
 $edit_content = '';
 if ($edit_slug && file_exists($f = PAGES_DIR . '/' . $edit_slug . '.php')) {
@@ -569,10 +536,10 @@ if ($edit_slug && file_exists($f = PAGES_DIR . '/' . $edit_slug . '.php')) {
         #sidebar-header img { max-height:80px; width:auto; border-radius:4px; }
         #sidebar a { display:flex; align-items:center; gap:0.8rem; padding:0.95rem 1.4rem; color:#94a3b8; text-decoration:none; transition:0.15s; }
         #sidebar a:hover, #sidebar a.active { background:var(--gray-100); color:var(--primary); }
-        #sidebar .menu-tab    { color:var(--menu-color); }
+        #sidebar .menu-tab { color:var(--menu-color); }
         #sidebar .settings-tab { color:var(--settings-color); }
-        #sidebar .about-tab   { color:var(--about-color); }
-        #sidebar .footer-tab  { color:var(--footer-color); }
+        #sidebar .about-tab { color:var(--about-color); }
+        #sidebar .footer-tab { color:var(--footer-color); }
         #sidebar .menu-tab.active, #sidebar .settings-tab.active, #sidebar .about-tab.active, #sidebar .footer-tab.active { background:var(--gray-100); font-weight:600; }
         #main { margin-left:var(--sidebar); flex:1; padding:2rem 2.4rem; }
         header { background:var(--gray-100); padding:1.2rem 2rem; border-bottom:1px solid var(--gray-200); display:flex; justify-content:space-between; align-items:center; border-radius:10px; margin-bottom:1.8rem; box-shadow:0 4px 14px rgba(0,0,0,0.2); }
@@ -610,7 +577,6 @@ if ($edit_slug && file_exists($f = PAGES_DIR . '/' . $edit_slug . '.php')) {
     </style>
 </head>
 <body>
-
 <aside id="sidebar">
     <div id="sidebar-header">
         <?php if ($logo_url): ?>
@@ -629,18 +595,17 @@ if ($edit_slug && file_exists($f = PAGES_DIR . '/' . $edit_slug . '.php')) {
         <a href="?logout=1"><i class="fa-solid fa-right-from-bracket"></i> Wyloguj</a>
     </nav>
 </aside>
-
 <main id="main">
     <header>
         <h1>
             <?php
             switch ($tab) {
-                case 'dashboard':  echo 'Dashboard'; break;
-                case 'menu':       echo 'Konfiguracja górnego menu'; break;
-                case 'stopka':     echo 'Konfiguracja stopki witryny'; break;
+                case 'dashboard': echo 'Dashboard'; break;
+                case 'menu': echo 'Konfiguracja górnego menu'; break;
+                case 'stopka': echo 'Konfiguracja stopki witryny'; break;
                 case 'ustawienia': echo 'Ustawienia witryny'; break;
-                case 'o-cms':      echo 'O tym CMS-ie'; break;
-                default:           echo 'Zarządzanie stronami';
+                case 'o-cms': echo 'O tym CMS-ie'; break;
+                default: echo 'Zarządzanie stronami';
             }
             ?>
         </h1>
@@ -650,11 +615,9 @@ if ($edit_slug && file_exists($f = PAGES_DIR . '/' . $edit_slug . '.php')) {
         </a>
         <?php endif; ?>
     </header>
-
     <?php if ($toast['msg']): ?>
         <div class="toast <?= $toast['type'] ?>"><?= htmlspecialchars($toast['msg']) ?></div>
     <?php endif; ?>
-
     <?php if ($tab === 'dashboard'): ?>
         <div class="dashboard-grid">
             <div class="dash-card">
@@ -685,6 +648,12 @@ if ($edit_slug && file_exists($f = PAGES_DIR . '/' . $edit_slug . '.php')) {
                 <p style="color:#94a3b8;"><?= count($menu_items) ?> pozycji</p>
             </div>
             <div class="dash-card">
+                <h3>Stopka</h3>
+                <div style="font-size:1.4rem; margin:0.8rem 0;">
+                    <?= $footer_enabled ? '<span style="color:var(--success);">WŁĄCZONA</span>' : '<span style="color:var(--danger);">WYŁĄCZONA</span>' ?>
+                </div>
+            </div>
+            <div class="dash-card">
                 <h3>Szybkie akcje</h3>
                 <div style="margin-top:1rem; display:flex; flex-direction:column; gap:0.8rem;">
                     <a href="admin.php?tab=strony" class="btn btn-view" style="text-align:center; justify-content:center;">
@@ -696,7 +665,6 @@ if ($edit_slug && file_exists($f = PAGES_DIR . '/' . $edit_slug . '.php')) {
                 </div>
             </div>
         </div>
-
     <?php elseif ($tab === 'stopka'): ?>
         <div class="card">
             <h2 style="color:var(--footer-color); margin-bottom: 1.5rem;"><i class="fa-solid fa-shoe-prints"></i> Konfiguracja stopki (Footer)</h2>
@@ -705,13 +673,14 @@ if ($edit_slug && file_exists($f = PAGES_DIR . '/' . $edit_slug . '.php')) {
             </p>
             <form method="post">
                 <input type="hidden" name="action" value="save_footer">
-
+                <label style="display:flex;align-items:center;gap:0.8rem;font-size:1.1rem;margin:1rem 0 1.5rem;">
+                    <input type="checkbox" name="footer_enabled" <?= $footer_enabled ? 'checked' : '' ?> style="width:auto;transform:scale(1.3);">
+                    <strong>Włącz stopkę na wszystkich stronach</strong>
+                </label>
                 <label>Prawa autorskie (Copyright)</label>
                 <input type="text" name="footer_copyright" value="<?= htmlspecialchars($footer_data['copyright'] ?? '') ?>" placeholder="np. © 2026 SpiderCMS. Wszystkie prawa zastrzeżone.">
-
                 <label>Opis w pierwszej kolumnie (O nas)</label>
                 <textarea name="footer_about_text" class="input-field" rows="3" placeholder="Krótki tekst o Twojej firmie..."><?= htmlspecialchars($footer_data['about_text'] ?? '') ?></textarea>
-
                 <div style="display:grid; grid-template-columns:1fr 1fr; gap:2rem; margin-top:1.5rem;">
                     <div>
                         <h3 style="color: var(--primary); font-size: 1.1rem;">Kolumna 2</h3>
@@ -731,7 +700,6 @@ if ($edit_slug && file_exists($f = PAGES_DIR . '/' . $edit_slug . '.php')) {
                 <div style="margin-top:2rem;"><button type="submit">Zapisz ustawienia stopki</button></div>
             </form>
         </div>
-
     <?php elseif ($tab === 'ustawienia'): ?>
         <div class="card card-settings">
             <h2 style="margin-top:0; color:var(--settings-color);"><i class="fa-solid fa-gear" style="margin-right:0.6rem;"></i> Ustawienia witryny</h2>
@@ -739,7 +707,6 @@ if ($edit_slug && file_exists($f = PAGES_DIR . '/' . $edit_slug . '.php')) {
                 <input type="hidden" name="action" value="save_settings">
                 <label for="site_name">Nazwa witryny</label>
                 <input type="text" id="site_name" name="site_name" value="<?= htmlspecialchars(SITE_NAME) ?>" required>
-
                 <div style="margin:2.5rem 0 1.5rem; font-weight:600; color:#94a3b8;">Główne kolory</div>
                 <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap:1.5rem;">
                     <div>
@@ -764,7 +731,6 @@ if ($edit_slug && file_exists($f = PAGES_DIR . '/' . $edit_slug . '.php')) {
                         </div>
                     </div>
                 </div>
-
                 <div style="margin-top:3rem;">
                     <label for="logo_upload">Logo witryny</label>
                     <input type="file" id="logo_upload" name="logo" accept="image/png,image/jpeg,image/svg+xml,image/gif">
@@ -784,7 +750,6 @@ if ($edit_slug && file_exists($f = PAGES_DIR . '/' . $edit_slug . '.php')) {
                 <button type="submit" class="btn-full-export"><i class="fa-solid fa-download"></i> Eksport całej witryny (ZIP)</button>
             </form>
         </div>
-
     <?php elseif ($tab === 'menu'): ?>
         <div class="card">
             <h2 style="margin-top:0; color:var(--menu-color);"><i class="fa-solid fa-bars" style="margin-right:0.6rem;"></i> Górne menu nawigacyjne</h2>
@@ -815,7 +780,6 @@ if ($edit_slug && file_exists($f = PAGES_DIR . '/' . $edit_slug . '.php')) {
                 <div style="margin-top:2.5rem;"><button type="submit"><i class="fa-solid fa-save"></i> Zapisz menu</button></div>
             </form>
         </div>
-
     <?php elseif ($tab === 'o-cms'): ?>
         <div class="card card-about">
             <h2 style="margin-top:0; color:var(--about-color);"><i class="fa-solid fa-info-circle" style="margin-right:0.6rem;"></i> O tym CMS-ie</h2>
@@ -827,7 +791,6 @@ if ($edit_slug && file_exists($f = PAGES_DIR . '/' . $edit_slug . '.php')) {
                 <p style="color:#6b7280;">© <?= date('Y') ?> SpiderCMS – wszystkie prawa zastrzeżone</p>
             </div>
         </div>
-
     <?php else: ?>
         <div class="card">
             <h2>Twoje strony (<?= count($pages) ?>)</h2>
@@ -861,7 +824,6 @@ if ($edit_slug && file_exists($f = PAGES_DIR . '/' . $edit_slug . '.php')) {
                 </tbody>
             </table>
         </div>
-
         <?php if ($edit_slug): ?>
         <div class="card">
             <h2>Edycja: <?= htmlspecialchars($edit_slug) ?><?php if ($edit_slug === 'index') echo ' <small>(strona główna)</small>'; ?></h2>
@@ -876,7 +838,6 @@ if ($edit_slug && file_exists($f = PAGES_DIR . '/' . $edit_slug . '.php')) {
             </form>
         </div>
         <?php endif; ?>
-
         <div class="card">
             <h2>Nowa strona</h2>
             <form method="post">
