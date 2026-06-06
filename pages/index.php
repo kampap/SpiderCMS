@@ -121,9 +121,9 @@ HTML;
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css">
   <style>
     :root {
- --primary: #b95ee4;
- --primary-dark: #000000;
- --accent: #ff0000;
+ --primary: #a855f7;
+ --primary-dark: #7e22ce;
+ --accent: #2563eb;
  --page-bg: #f9fafb;
  --page-text: #111827;
  --header-bg: #ffffff;
@@ -134,12 +134,12 @@ HTML;
  --link-color: #a855f7;
  --button-bg: #a855f7;
  --button-text: #ffffff;
- --font-family: system;
- --header-height: 150px;
- --logo-height: 40px;
+ --font-family: system-ui, sans-serif;
+ --header-height: 74px;
+ --logo-height: 100px;
  --content-width: 1240px;
  --radius: 10px;
- --header-shadow: none;
+ --header-shadow: 0 2px 10px rgba(0,0,0,0.08);
  --gray50: #f9fafb;
  --gray800: #1f2937;
 }
