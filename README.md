@@ -31,7 +31,7 @@ SpiderCMS to prosty, szybki i w pełni plikowy CMS, który nie wymaga bazy danyc
 
 ## Instalacja
 
-1. Skopiuj wszystkie pliki do folderu na serwerze (np. `/litecard-cms/`)
+1. Skopiuj wszystkie pliki do głównego folderu na serwerze 
 2. Ustaw uprawnienia zapisu na:
    - katalog `pages/`
    - katalog `uploads/`
@@ -41,22 +41,6 @@ SpiderCMS to prosty, szybki i w pełni plikowy CMS, który nie wymaga bazy danyc
 
 **Zalecane:** Po pierwszym zalogowaniu zmień hasło w zakładce **Ustawienia**.
 
----
-
-## Struktura projektu
-litecard-cms/
-├── admin.php                 # Główny panel administracyjny
-├── config.php                # Konfiguracja podstawowa
-├── header.php                # Globalny nagłówek
-├── footer.php                # Globalna stopka (generowana automatycznie)
-├── index.php                 # Przekierowanie na stronę główną
-├── pages/                    # Wszystkie podstrony (.php)
-├── uploads/                  # Wgrane pliki i zdjęcia
-├── .settings.json
-├── .theme.json
-├── .footer.json
-├── .menu.json
-└── .admin_hash
 
 ---
 
