@@ -1,15 +1,85 @@
-SpiderCMS to lekki, plikowy system zarządzania treścią stworzony specjalnie z myślą o prostocie i szybkości.
+# SpiderCMS
 
-1. Zero bazy danych – wszystko w plikach
-2. Edycja kodu HTML/CSS/PHP wprost w przeglądarce
-3. Dynamiczne logo i kolory zapisywane w plikach JSON
-4. Proste płaskie menu nawigacyjne
-5. Eksport całej witryny jednym kliknięciem (ZIP)
-   
-Projekt powstał jako alternatywa dla ciężkich CMS-ów – idealny do małych i średnich stron firmowych, portfolio, landing page.
+**Ultra-lekki, plikowy system zarządzania treścią (Flat-File CMS) napisany w PHP.**
 
-1. Pierwsze logowanie
-Logowanie do systemu CMS jest zabezpieczone hasłem "admin2026".
-Zalecana jest zmiana hasła za pomocą narzędzia dostępnym pod adresem: https://argon2.online/.
-Podajemy swoje hasło i generujemy hash i wklejamy go do pliku .admin_hash.
-Od tej pory ustawione jest nowe hasło do panelu CMS.
+SpiderCMS to prosty, szybki i w pełni plikowy CMS, który nie wymaga bazy danych. Został stworzony z myślą o wydajności, łatwości obsługi i pełnej kontroli nad kodem.
+
+---
+
+## ✨ Główne funkcje
+
+- **Całkowicie plikowy** – nie potrzebuje MySQL ani żadnej bazy danych
+- Nowoczesny, ciemny panel administracyjny w neonowym stylu
+- **Dynamiczna stopka** – dowolna liczba kolumn, edytowalna z poziomu panelu
+- Pełna personalizacja motywu (kolory, logo, czcionki, wymiary, cienie)
+- Wbudowany edytor **TinyMCE** z gotowymi blokami (hero, galerie, FAQ, karty, kolumny itp.)
+- Biblioteka mediów z możliwością wgrywania zdjęć i plików
+- Zarządzanie menu nawigacyjnym (włącz/wyłącz + edycja pozycji)
+- Ustawianie dowolnej strony jako strony głównej
+- Eksport całej witryny do pliku ZIP jednym kliknięciem
+- Zmiana hasła administratora bezpośrednio z panelu
+- Automatyczne propagowanie zmian kolorów na wszystkich stronach
+- Ochrona logowania (blokada po zbyt wielu nieudanych próbach + hashowanie Argon2id)
+
+---
+
+## Wymagania
+
+- PHP 7.4 lub nowszy
+- Serwer z możliwością zapisu plików
+---
+
+## Instalacja
+
+1. Skopiuj wszystkie pliki do folderu na serwerze (np. `/litecard-cms/`)
+2. Ustaw uprawnienia zapisu na:
+   - katalog `pages/`
+   - katalog `uploads/`
+   - pliki zaczynające się od `.` (`.settings.json`, `.theme.json`, `.footer.json` itp.)
+3. Otwórz w przeglądarce adres: `twojadomena.pl/litecard-cms/admin.php`
+4. Domyślne hasło: **`admin2026`**
+
+**Zalecane:** Po pierwszym zalogowaniu zmień hasło w zakładce **Ustawienia**.
+
+---
+
+## Struktura projektu
+litecard-cms/
+├── admin.php                 # Główny panel administracyjny
+├── config.php                # Konfiguracja podstawowa
+├── header.php                # Globalny nagłówek
+├── footer.php                # Globalna stopka (generowana automatycznie)
+├── index.php                 # Przekierowanie na stronę główną
+├── pages/                    # Wszystkie podstrony (.php)
+├── uploads/                  # Wgrane pliki i zdjęcia
+├── .settings.json
+├── .theme.json
+├── .footer.json
+├── .menu.json
+└── .admin_hash
+
+---
+
+## Dla kogo jest SpiderCMS?
+
+- Osób szukających lekkiej alternatywy dla WordPressa
+- Freelancerów i agencji tworzących proste strony www
+- Portfolio, stron firmowych, landing page’i i małych blogów
+- Projektów, w których liczy się szybkość działania i prostota utrzymania
+
+---
+
+## Autor
+
+Kamil Paprota
+
+---
+
+## Licencja
+
+Projekt jest open-source. Możesz go używać prywatnie i komercyjnie.
+
+---
+
+**Staruj repozytorium, jeśli projekt Ci się podoba!**  
+Pull Requesty oraz sugestie są mile widziane.
