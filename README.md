@@ -36,7 +36,7 @@ SpiderCMS to prosty, szybki i w pełni plikowy CMS, który nie wymaga bazy danyc
    - katalog `pages/`
    - katalog `uploads/`
    - pliki zaczynające się od `.` (`.settings.json`, `.theme.json`, `.footer.json` itp.)
-3. Otwórz w przeglądarce adres: `twojadomena.pl/litecard-cms/admin.php`
+3. Otwórz w przeglądarce adres: `twojadomena.pl/admin.php`
 4. Domyślne hasło: **`admin2026`**
 
 **Zalecane:** Po pierwszym zalogowaniu zmień hasło w zakładce **Ustawienia**.
