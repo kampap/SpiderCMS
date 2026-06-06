@@ -7,6 +7,7 @@
 // Naprawiono strukturę formularzy (zapis ustawień oraz eksport ZIP działają niezależnie)
 // NAPRAWIONO: Dodano pełną obsługę, formularz oraz dynamiczny szablon generowania stopki z poprawną ścieżką
 // DYNAMICZNA STOPKA: Zapis stopki aktualizuje teraz globalny plik footer.php oraz automatycznie naprawia istniejące podstrony!
+// Dodano: Zmianę hasła administratora z poziomu zakładki Ustawienia
 // Wersja: czerwiec 2026
 // ======================================================================
 
@@ -45,14 +46,43 @@ $settings = file_exists($settings_file) ? json_decode(file_get_contents($setting
 $logo_url = $settings['logo'] ?? (BASE_URL . 'assets/images/spidercms-icon.png');
 
 // ----------------------------------------------------------------------
-// Wczytanie kolorów
+// Wczytanie kolorów i rozszerzonych ustawień stylu
 // ----------------------------------------------------------------------
 $theme_file = __DIR__ . '/.theme.json';
-$theme = file_exists($theme_file) ? json_decode(file_get_contents($theme_file), true) : [
+$theme_defaults = [
     'primary' => '#a855f7',
     'primary-dark' => '#7e22ce',
     'accent' => '#2563eb',
+    'page-bg' => '#f9fafb',
+    'page-text' => '#111827',
+    'header-bg' => '#ffffff',
+    'header-text' => '#374151',
+    'footer-bg' => '#1f2937',
+    'footer-text' => '#f3f4f6',
+    'footer-muted' => '#9ca3af',
+    'link-color' => '#a855f7',
+    'button-bg' => '#a855f7',
+    'button-text' => '#ffffff',
+    'font-family' => 'system-ui, sans-serif',
+    'header-height' => '74',
+    'logo-height' => '100',
+    'content-width' => '1240',
+    'border-radius' => '10',
+    'shadow-enabled' => '1',
 ];
+$theme_loaded = file_exists($theme_file) ? json_decode(file_get_contents($theme_file), true) : [];
+if (!is_array($theme_loaded)) $theme_loaded = [];
+$theme = array_merge($theme_defaults, $theme_loaded);
+
+function theme_value($key, $default = '') {
+    global $theme, $theme_defaults;
+    return $theme[$key] ?? $theme_defaults[$key] ?? $default;
+}
+
+function css_px($value, $default) {
+    $value = preg_replace('/[^0-9.]/', '', (string)$value);
+    return $value !== '' ? $value . 'px' : $default . 'px';
+}
 
 // ----------------------------------------------------------------------
 // Wczytanie ustawień stopki
@@ -69,14 +99,67 @@ $footer_data = file_exists($footer_file) ? json_decode(file_get_contents($footer
 $footer_enabled = file_exists(__DIR__ . '/.footer_enabled');
 
 // ----------------------------------------------------------------------
+// Wczytanie ustawienia strony głównej
+// ----------------------------------------------------------------------
+$homepage_file = __DIR__ . '/.homepage';
+$homepage_slug = file_exists($homepage_file) ? trim((string)file_get_contents($homepage_file)) : 'index';
+if ($homepage_slug === '') {
+    $homepage_slug = 'index';
+}
+// ----------------------------------------------------------------------
+// MEDIA LIBRARY - dodaj tutaj
+// ----------------------------------------------------------------------
+$uploads_dir = __DIR__ . '/uploads/';
+if (!is_dir($uploads_dir)) {
+    mkdir($uploads_dir, 0755, true);
+}
+
+function get_media_files() {
+    global $uploads_dir;
+    $files = [];
+    foreach (glob($uploads_dir . '*') as $file) {
+        if (is_file($file)) {
+            $files[] = [
+                'name' => basename($file),
+                'url'  => BASE_URL . 'uploads/' . basename($file),
+                'size' => filesize($file),
+                'modified' => date('Y-m-d H:i', filemtime($file)),
+                'ext'  => strtolower(pathinfo($file, PATHINFO_EXTENSION))
+            ];
+        }
+    }
+    usort($files, fn($a, $b) => filemtime($uploads_dir.$b['name']) - filemtime($uploads_dir.$a['name']));
+    return $files;
+}
+
+// ----------------------------------------------------------------------
 // Funkcja aktualizująca kolory we wszystkich stronach
 // ----------------------------------------------------------------------
 function update_all_pages_colors() {
     global $theme;
-    $primary = $theme['primary'] ?? '#a855f7';
-    $primary_dark = $theme['primary-dark'] ?? '#7e22ce';
-    $accent = $theme['accent'] ?? '#2563eb';
-    $root_block = ":root {\n --primary: {$primary};\n --primary-dark: {$primary_dark};\n --accent: {$accent};\n --gray50: #f9fafb;\n --gray800: #1f2937;\n }";
+    $root_block = ":root {\n" .
+        " --primary: " . ($theme['primary'] ?? '#a855f7') . ";\n" .
+        " --primary-dark: " . ($theme['primary-dark'] ?? '#7e22ce') . ";\n" .
+        " --accent: " . ($theme['accent'] ?? '#2563eb') . ";\n" .
+        " --page-bg: " . ($theme['page-bg'] ?? '#f9fafb') . ";\n" .
+        " --page-text: " . ($theme['page-text'] ?? '#111827') . ";\n" .
+        " --header-bg: " . ($theme['header-bg'] ?? '#ffffff') . ";\n" .
+        " --header-text: " . ($theme['header-text'] ?? '#374151') . ";\n" .
+        " --footer-bg: " . ($theme['footer-bg'] ?? '#1f2937') . ";\n" .
+        " --footer-text: " . ($theme['footer-text'] ?? '#f3f4f6') . ";\n" .
+        " --footer-muted: " . ($theme['footer-muted'] ?? '#9ca3af') . ";\n" .
+        " --link-color: " . ($theme['link-color'] ?? '#a855f7') . ";\n" .
+        " --button-bg: " . ($theme['button-bg'] ?? '#a855f7') . ";\n" .
+        " --button-text: " . ($theme['button-text'] ?? '#ffffff') . ";\n" .
+        " --font-family: " . ($theme['font-family'] ?? 'system-ui, sans-serif') . ";\n" .
+        " --header-height: " . css_px($theme['header-height'] ?? '74', 74) . ";\n" .
+        " --logo-height: " . css_px($theme['logo-height'] ?? '100', 100) . ";\n" .
+        " --content-width: " . css_px($theme['content-width'] ?? '1240', 1240) . ";\n" .
+        " --radius: " . css_px($theme['border-radius'] ?? '10', 10) . ";\n" .
+        " --header-shadow: " . (!empty($theme['shadow-enabled']) ? '0 2px 10px rgba(0,0,0,0.08)' : 'none') . ";\n" .
+        " --gray50: #f9fafb;\n" .
+        " --gray800: #1f2937;\n" .
+        "}";
     $updated = 0;
     $files = glob(PAGES_DIR . '/*.php');
     foreach ($files as $file) {
@@ -88,6 +171,26 @@ function update_all_pages_colors() {
         }
     }
     return $updated;
+}
+
+// ----------------------------------------------------------------------
+// Funkcja zapisująca przekierowanie strony głównej
+// ----------------------------------------------------------------------
+function write_homepage_redirect($slug) {
+    $slug = preg_replace('/[^a-z0-9\-_]+/i', '', (string)$slug);
+    if ($slug === '') {
+        $slug = 'index';
+    }
+
+    $index_path = __DIR__ . '/index.php';
+    $content = "<?php\n";
+    $content .= "require_once __DIR__ . '/config.php';\n";
+    $content .= "\$homepage = '" . addslashes($slug) . "';\n";
+    $content .= "\$target = rtrim(PAGES_URL, '/') . '/' . \$homepage . '.php';\n";
+    $content .= "header('Location: ' . \$target);\n";
+    $content .= "exit;\n";
+
+    return file_put_contents($index_path, $content) !== false;
 }
 
 // ----------------------------------------------------------------------
@@ -225,17 +328,44 @@ HTML;
       --primary: <?php echo $theme['primary'] ?? '#a855f7'; ?>;
       --primary-dark: <?php echo $theme['primary-dark'] ?? '#7e22ce'; ?>;
       --accent: <?php echo $theme['accent'] ?? '#2563eb'; ?>;
+      --page-bg: <?php echo $theme['page-bg'] ?? '#f9fafb'; ?>;
+      --page-text: <?php echo $theme['page-text'] ?? '#111827'; ?>;
+      --header-bg: <?php echo $theme['header-bg'] ?? '#ffffff'; ?>;
+      --header-text: <?php echo $theme['header-text'] ?? '#374151'; ?>;
+      --footer-bg: <?php echo $theme['footer-bg'] ?? '#1f2937'; ?>;
+      --footer-text: <?php echo $theme['footer-text'] ?? '#f3f4f6'; ?>;
+      --footer-muted: <?php echo $theme['footer-muted'] ?? '#9ca3af'; ?>;
+      --link-color: <?php echo $theme['link-color'] ?? '#a855f7'; ?>;
+      --button-bg: <?php echo $theme['button-bg'] ?? '#a855f7'; ?>;
+      --button-text: <?php echo $theme['button-text'] ?? '#ffffff'; ?>;
+      --font-family: <?php echo $theme['font-family'] ?? 'system-ui, sans-serif'; ?>;
+      --header-height: <?php echo preg_replace('/[^0-9.]/', '', $theme['header-height'] ?? '74'); ?>px;
+      --logo-height: <?php echo preg_replace('/[^0-9.]/', '', $theme['logo-height'] ?? '100'); ?>px;
+      --content-width: <?php echo preg_replace('/[^0-9.]/', '', $theme['content-width'] ?? '1240'); ?>px;
+      --radius: <?php echo preg_replace('/[^0-9.]/', '', $theme['border-radius'] ?? '10'); ?>px;
+      --header-shadow: <?php echo !empty($theme['shadow-enabled']) ? '0 2px 10px rgba(0,0,0,0.08)' : 'none'; ?>;
       --gray50: #f9fafb;
       --gray800: #1f2937;
     }
     *{margin:0;padding:0;box-sizing:border-box;}
-    body{font-family:system-ui,sans-serif;line-height:1.6;color:#111827;background:var(--gray50);display:flex;flex-direction:column;min-height:100vh;}
-    .site-header{position:fixed;top:0;left:0;right:0;background:white;box-shadow:0 2px 10px rgba(0,0,0,0.08);z-index:1000;}
-    .header-container{max-width:1240px;margin:0 auto;padding:0 1.5rem;display:flex;justify-content:space-between;align-items:center;height:74px;}
-    .logo{font-weight:700;font-size:1.4rem;color:var(--primary);text-decoration:none;display:flex;align-items:center;}
-    .logo img{max-height:100px;width:auto;}
+    body{font-family:var(--font-family);line-height:1.6;color:var(--page-text);background:var(--page-bg);display:flex;flex-direction:column;min-height:100vh;}
+    .cms-hero{padding:3rem 2rem;border-radius:18px;background:rgba(168,85,247,0.10);margin:1.5rem auto;max-width:var(--content-width);}
+    .cms-hero h1{font-size:clamp(2rem,4vw,3.4rem);line-height:1.1;margin-bottom:1rem;color:var(--primary);}
+    .cms-btn{display:inline-block;padding:.85rem 1.25rem;border-radius:999px;background:var(--button-bg);color:var(--button-text);text-decoration:none;font-weight:700;}
+    .cms-columns{display:grid;grid-template-columns:1fr 1fr;gap:2rem;max-width:var(--content-width);margin:1.5rem auto;}
+    .cms-card-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:1rem;max-width:var(--content-width);margin:1.5rem auto;}
+    .cms-card{padding:1.2rem;border:1px solid rgba(0,0,0,0.08);border-radius:var(--radius);background:#fff;}
+    .cms-gallery{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:1rem;max-width:var(--content-width);margin:1.5rem auto;}
+    .cms-gallery img{width:100%;height:auto;border-radius:var(--radius);display:block;}
+    .cms-faq,.cms-contact{max-width:var(--content-width);margin:1.5rem auto;}
+    .cms-faq details{padding:1rem;border:1px solid rgba(0,0,0,0.08);border-radius:var(--radius);margin:.7rem 0;background:#fff;}
+    @media (max-width:768px){.cms-columns{grid-template-columns:1fr;}}
+    .site-header{position:fixed;top:0;left:0;right:0;background:var(--header-bg);box-shadow:var(--header-shadow);z-index:1000;text-align:left;}
+    .header-container{max-width:var(--content-width);margin:0 auto;padding:0 1.5rem;display:flex;justify-content:space-between;align-items:center;height:var(--header-height);text-align:left;}
+    .logo{font-weight:700;font-size:1.4rem;color:var(--primary);text-decoration:none;display:flex;align-items:center;justify-content:flex-start;text-align:left;margin-right:auto;}
+    .logo img{max-height:var(--logo-height);width:auto;display:block;margin:0;}
     .nav-menu{display:flex;gap:2rem;align-items:center;}
-    .nav-menu a{color:#374151;text-decoration:none;font-weight:500;padding:0.5rem 1rem;display:flex;align-items:center;gap:0.5rem;}
+    .nav-menu a{color:var(--header-text);text-decoration:none;font-weight:500;padding:0.5rem 1rem;display:flex;align-items:center;gap:0.5rem;}
     .nav-menu a:hover{color:var(--primary);}
     .nav-menu a img{height:28px;width:auto;vertical-align:middle;}
     .menu-toggle{display:none;font-size:1.9rem;cursor:pointer;color:#374151;}
@@ -244,13 +374,14 @@ HTML;
       .nav-menu.active{display:flex;}
       .menu-toggle{display:block;}
     }
-    main{margin-top:90px;padding:2rem 1rem;flex:1;}
-    .site-footer{background:#1f2937;color:#f3f4f6;padding:3rem 1.5rem;margin-top:5rem;font-size:0.95rem;}
-    .footer-container{max-width:1240px;margin:0 auto;display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:2.5rem;}
+    main{margin-top:calc(var(--header-height) + 16px);padding:2rem 1rem;flex:1;}
+    .site-footer{background:var(--footer-bg);color:var(--footer-text);padding:3rem 1.5rem;margin-top:5rem;font-size:0.95rem;}
+    .footer-container{max-width:var(--content-width);margin:0 auto;display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:2.5rem;text-align:left;}
     .footer-col h4{color:var(--primary);margin-bottom:1rem;font-size:1.15rem;}
-    .footer-col a{color:#9ca3af;text-decoration:none;}
+    .footer-col p{text-align:justify;}
+    .footer-col a{color:var(--footer-muted);text-decoration:none;}
     .footer-col a:hover{color:white;}
-    .footer-bottom{max-width:1240px;margin:2rem auto 0;padding-top:1.5rem;border-top:1px solid #374151;text-align:center;color:#9ca3af;}
+    .footer-bottom{max-width:var(--content-width);margin:2rem auto 0;padding-top:1.5rem;border-top:1px solid #374151;text-align:justify;color:var(--footer-muted);}
   </style>
 </head>
 <body>
@@ -272,6 +403,24 @@ PHP;
             $toast = ['type'=>'error', 'msg'=>'Slug i tytuł są wymagane'];
         }
     }
+    // AKCJA: USTAWIENIE STRONY GŁÓWNEJ
+    if ($action === 'set_homepage') {
+        $slug = preg_replace('/[^a-z0-9\-_]+/i', '', trim($_POST['slug'] ?? $_POST['homepage_slug'] ?? ''));
+        $file = PAGES_DIR . '/' . $slug . '.php';
+        if ($slug === '' || !file_exists($file)) {
+            $toast = ['type'=>'error', 'msg'=>'Nie można ustawić strony głównej – wybrana strona nie istnieje'];
+        } else {
+            file_put_contents(__DIR__ . '/.homepage', $slug);
+            if (write_homepage_redirect($slug)) {
+                $toast = ['type'=>'success', 'msg'=>'Ustawiono stronę główną: ' . $slug . '.php'];
+            } else {
+                $toast = ['type'=>'error', 'msg'=>'Zapisano ustawienie, ale nie udało się utworzyć przekierowania index.php'];
+            }
+        }
+        header('Location: admin.php?tab=ustawienia');
+        exit;
+    }
+
     // AKCJA: EDYCJA STRONY
     if ($action === 'edit') {
         $slug = trim($_POST['slug'] ?? '');
@@ -293,8 +442,11 @@ PHP;
     // AKCJA: USUWANIE STRONY
     if ($action === 'delete') {
         $slug = trim($_POST['slug'] ?? '');
-        if ($slug === 'index') {
-            $toast = ['type'=>'error', 'msg'=>'Nie można usunąć strony głównej'];
+        global $homepage_slug;
+        if ($slug === $homepage_slug) {
+            $toast = ['type'=>'error', 'msg'=>'Nie można usunąć aktywnej strony głównej. Najpierw ustaw inną stronę jako główną.'];
+        } elseif ($slug === 'index') {
+            $toast = ['type'=>'error', 'msg'=>'Nie można usunąć podstawowej strony index'];
         } else {
             $file = PAGES_DIR . '/' . $slug . '.php';
             if (file_exists($file) && unlink($file)) {
@@ -397,6 +549,22 @@ PHP;
         $new_primary = trim($_POST['primary'] ?? '');
         $new_primary_d = trim($_POST['primary_dark'] ?? '');
         $new_accent = trim($_POST['accent'] ?? '');
+        $new_page_bg = trim($_POST['page_bg'] ?? '');
+        $new_page_text = trim($_POST['page_text'] ?? '');
+        $new_header_bg = trim($_POST['header_bg'] ?? '');
+        $new_header_text = trim($_POST['header_text'] ?? '');
+        $new_footer_bg = trim($_POST['footer_bg'] ?? '');
+        $new_footer_text = trim($_POST['footer_text'] ?? '');
+        $new_footer_muted = trim($_POST['footer_muted'] ?? '');
+        $new_link_color = trim($_POST['link_color'] ?? '');
+        $new_button_bg = trim($_POST['button_bg'] ?? '');
+        $new_button_text = trim($_POST['button_text'] ?? '');
+        $new_font_family = trim($_POST['font_family'] ?? '');
+        $new_header_height = trim($_POST['header_height'] ?? '');
+        $new_logo_height = trim($_POST['logo_height'] ?? '');
+        $new_content_width = trim($_POST['content_width'] ?? '');
+        $new_border_radius = trim($_POST['border_radius'] ?? '');
+        $new_shadow_enabled = !empty($_POST['shadow_enabled']) ? '1' : '0';
         $logo_path = $logo_url;
         $logo_upload = $_FILES['logo'] ?? null;
         if ($logo_upload && $logo_upload['error'] === UPLOAD_ERR_OK) {
@@ -429,9 +597,25 @@ PHP;
             );
             file_put_contents($config_path, $config_content);
             $theme_data = [
-                'primary' => $new_primary ?: '#a855f7',
-                'primary-dark' => $new_primary_d ?: '#7e22ce',
-                'accent' => $new_accent ?: '#2563eb',
+                'primary' => $new_primary ?: theme_value('primary', '#a855f7'),
+                'primary-dark' => $new_primary_d ?: theme_value('primary-dark', '#7e22ce'),
+                'accent' => $new_accent ?: theme_value('accent', '#2563eb'),
+                'page-bg' => $new_page_bg ?: theme_value('page-bg', '#f9fafb'),
+                'page-text' => $new_page_text ?: theme_value('page-text', '#111827'),
+                'header-bg' => $new_header_bg ?: theme_value('header-bg', '#ffffff'),
+                'header-text' => $new_header_text ?: theme_value('header-text', '#374151'),
+                'footer-bg' => $new_footer_bg ?: theme_value('footer-bg', '#1f2937'),
+                'footer-text' => $new_footer_text ?: theme_value('footer-text', '#f3f4f6'),
+                'footer-muted' => $new_footer_muted ?: theme_value('footer-muted', '#9ca3af'),
+                'link-color' => $new_link_color ?: theme_value('link-color', '#a855f7'),
+                'button-bg' => $new_button_bg ?: theme_value('button-bg', '#a855f7'),
+                'button-text' => $new_button_text ?: theme_value('button-text', '#ffffff'),
+                'font-family' => $new_font_family ?: theme_value('font-family', 'system-ui, sans-serif'),
+                'header-height' => preg_replace('/[^0-9.]/', '', $new_header_height ?: theme_value('header-height', '74')),
+                'logo-height' => preg_replace('/[^0-9.]/', '', $new_logo_height ?: theme_value('logo-height', '100')),
+                'content-width' => preg_replace('/[^0-9.]/', '', $new_content_width ?: theme_value('content-width', '1240')),
+                'border-radius' => preg_replace('/[^0-9.]/', '', $new_border_radius ?: theme_value('border-radius', '10')),
+                'shadow-enabled' => $new_shadow_enabled,
             ];
             file_put_contents(__DIR__ . '/.theme.json', json_encode($theme_data, JSON_PRETTY_PRINT));
             $settings['logo'] = $logo_path;
@@ -441,6 +625,33 @@ PHP;
             exit;
         }
     }
+
+    // === NOWA AKCJA: ZMIANA HASŁA ===
+    if ($action === 'change_password') {
+        $old_password = $_POST['old_password'] ?? '';
+        $new_password = $_POST['new_password'] ?? '';
+        $confirm_password = $_POST['confirm_password'] ?? '';
+
+        if (empty($old_password) || empty($new_password) || empty($confirm_password)) {
+            $toast = ['type' => 'error', 'msg' => 'Wszystkie pola są wymagane'];
+        } elseif ($new_password !== $confirm_password) {
+            $toast = ['type' => 'error', 'msg' => 'Nowe hasło i potwierdzenie nie są identyczne'];
+        } elseif (strlen($new_password) < 6) {
+            $toast = ['type' => 'error', 'msg' => 'Nowe hasło musi mieć minimum 6 znaków'];
+        } elseif (!password_verify($old_password, $ADMIN_HASH)) {
+            $toast = ['type' => 'error', 'msg' => 'Stare hasło jest nieprawidłowe'];
+        } else {
+            $new_hash = password_hash($new_password, PASSWORD_ARGON2ID);
+            if (file_put_contents($hash_file, $new_hash) !== false) {
+                chmod($hash_file, 0600);
+                $ADMIN_HASH = $new_hash; // aktualizacja w bieżącej sesji
+                $toast = ['type' => 'success', 'msg' => 'Hasło zostało pomyślnie zmienione'];
+            } else {
+                $toast = ['type' => 'error', 'msg' => 'Błąd zapisu nowego hasła'];
+            }
+        }
+    }
+
     // AKCJA: EKSPORT CAŁOŚCI ZIP
     if ($action === 'export_all') {
         $zip_name = 'spider-cms-full-' . date('Y-m-d-H-i-s') . '.zip';
@@ -470,6 +681,32 @@ PHP;
             exit;
         }
     }
+    // ====================== MEDIA LIBRARY ======================
+    if ($action === 'upload_media') {
+        $uploaded = 0;
+        if (isset($_FILES['media_files']['tmp_name'])) {
+            foreach ($_FILES['media_files']['tmp_name'] as $i => $tmp) {
+                if ($_FILES['media_files']['error'][$i] === UPLOAD_ERR_OK) {
+                    $original_name = $_FILES['media_files']['name'][$i];
+                    $safe_name = preg_replace('/[^a-zA-Z0-9\._-]/', '-', $original_name);
+                    if (move_uploaded_file($tmp, $uploads_dir . $safe_name)) {
+                        $uploaded++;
+                    }
+                }
+            }
+        }
+        $toast = ['type' => $uploaded > 0 ? 'success' : 'error', 'msg' => $uploaded > 0 ? "$uploaded plik(ów) wgrano pomyślnie" : 'Błąd podczas wgrywania plików'];
+    }
+
+    if ($action === 'delete_media') {
+        $filename = basename($_POST['file'] ?? '');
+        $filepath = $uploads_dir . $filename;
+        if ($filename && file_exists($filepath) && unlink($filepath)) {
+            $toast = ['type' => 'success', 'msg' => 'Plik został usunięty'];
+        } else {
+            $toast = ['type' => 'error', 'msg' => 'Nie udało się usunąć pliku'];
+        }
+    }
 }
 
 // ----------------------------------------------------------------------
@@ -482,6 +719,15 @@ foreach (glob(PAGES_DIR . '/*.php') ?: [] as $f) {
     $slug = basename($f, '.php');
     $pages[] = ['slug' => $slug, 'modified' => date('Y-m-d H:i', filemtime($f))];
 }
+// Media Library - musi być zawsze zdefiniowane
+$media_files = get_media_files();
+// Jeżeli wskazana strona główna nie istnieje, wracamy do index.php albo pierwszej dostępnej strony.
+$page_slugs = array_column($pages, 'slug');
+if (!in_array($homepage_slug, $page_slugs, true)) {
+    $homepage_slug = in_array('index', $page_slugs, true) ? 'index' : ($page_slugs[0] ?? 'index');
+    file_put_contents(__DIR__ . '/.homepage', $homepage_slug);
+}
+
 $edit_slug = $_GET['edit'] ?? '';
 $edit_content = '';
 if ($edit_slug && file_exists($f = PAGES_DIR . '/' . $edit_slug . '.php')) {
@@ -489,6 +735,25 @@ if ($edit_slug && file_exists($f = PAGES_DIR . '/' . $edit_slug . '.php')) {
     if (preg_match('/\$content\s*=\s*<<<HTML\s*(.*?)\s*HTML;/s', $raw, $m)) {
         $edit_content = trim($m[1]);
     }
+}
+
+function render_editor_tools() {
+    ?>
+    <div class="editor-tools">
+        <h3><i class="fa-solid fa-wand-magic-sparkles"></i> Szybkie elementy strony</h3>
+        <div class="editor-tool-grid">
+            <button type="button" class="editor-tool-btn" data-snippet="hero"><i class="fa-solid fa-heading"></i> Sekcja hero</button>
+            <button type="button" class="editor-tool-btn" data-snippet="button"><i class="fa-solid fa-square-arrow-up-right"></i> Przycisk CTA</button>
+            <button type="button" class="editor-tool-btn" data-snippet="columns"><i class="fa-solid fa-columns-3"></i> Dwie kolumny</button>
+            <button type="button" class="editor-tool-btn" data-snippet="cards"><i class="fa-solid fa-table-cells-large"></i> Karty oferty</button>
+            <button type="button" class="editor-tool-btn" data-snippet="gallery"><i class="fa-solid fa-images"></i> Galeria zdjęć</button>
+            <button type="button" class="editor-tool-btn" data-snippet="faq"><i class="fa-solid fa-circle-question"></i> FAQ</button>
+            <button type="button" class="editor-tool-btn" data-snippet="contact"><i class="fa-solid fa-address-card"></i> Blok kontaktowy</button>
+            <button type="button" class="editor-tool-btn" data-snippet="separator"><i class="fa-solid fa-minus"></i> Separator</button>
+        </div>
+        <div class="editor-note">Kliknięcie wstawia gotowy blok w miejscu kursora w edytorze. Bloki możesz później dowolnie edytować w TinyMCE.</div>
+    </div>
+    <?php
 }
 ?>
 <!DOCTYPE html>
@@ -506,11 +771,17 @@ if ($edit_slug && file_exists($f = PAGES_DIR . '/' . $edit_slug . '.php')) {
         height: 540,
         promotion: false,
         branding: false,
-        plugins: 'advlist autolink lists link image charmap preview anchor searchreplace visualblocks code fullscreen table help wordcount',
-        toolbar: 'undo redo | blocks fontfamily fontsize | bold italic underline strikethrough | forecolor backcolor | link image media | alignleft aligncenter alignright alignjustify | bullist numlist outdent indent | code fullscreen removeformat',
+        plugins: 'advlist autolink lists link image media charmap preview anchor searchreplace visualblocks code fullscreen table help wordcount lists autoresize insertdatetime template pagebreak nonbreaking',
+        toolbar: 'undo redo | blocks fontfamily fontsize | bold italic underline strikethrough | forecolor backcolor | link image media table | alignleft aligncenter alignright alignjustify | bullist numlist outdent indent | pagebreak nonbreaking template | code fullscreen preview removeformat',
         menubar: 'file edit view insert format tools table help',
         valid_elements: '*[*]',
-        extended_valid_elements: 'style,script[*],iframe[*]'
+        extended_valid_elements: 'style,script[*],iframe[*],section[*],article[*],div[*],a[*],img[*],video[*],source[*]',
+        templates: [
+          { title: 'Sekcja hero', description: 'Duży nagłówek z przyciskiem', content: '<section class="cms-hero"><h1>Duży nagłówek strony</h1><p>Krótki opis oferty lub treści strony.</p><p><a class="cms-btn" href="#kontakt">Skontaktuj się</a></p></section>' },
+          { title: 'Dwie kolumny', description: 'Układ 50/50', content: '<div class="cms-columns"><div><h2>Lewa kolumna</h2><p>Treść pierwszej kolumny.</p></div><div><h2>Prawa kolumna</h2><p>Treść drugiej kolumny.</p></div></div>' },
+          { title: 'FAQ', description: 'Pytania i odpowiedzi', content: '<section class="cms-faq"><h2>Najczęstsze pytania</h2><details open><summary>Pytanie numer 1</summary><p>Odpowiedź na pytanie.</p></details><details><summary>Pytanie numer 2</summary><p>Odpowiedź na pytanie.</p></details></section>' }
+        ],
+        content_style: 'body{font-family:system-ui,sans-serif;font-size:16px;line-height:1.65;} .cms-hero{padding:3rem 2rem;border-radius:18px;background:#f3e8ff;} .cms-btn{display:inline-block;padding:.85rem 1.25rem;border-radius:999px;background:#a855f7;color:#fff;text-decoration:none;font-weight:700;} .cms-columns{display:grid;grid-template-columns:1fr 1fr;gap:2rem;} .cms-card-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:1rem;} .cms-card{padding:1.2rem;border:1px solid #e5e7eb;border-radius:14px;background:#fff;} details{padding:1rem;border:1px solid #e5e7eb;border-radius:10px;margin:.7rem 0;}'
       });
     </script>
     <style>
@@ -572,8 +843,16 @@ if ($edit_slug && file_exists($f = PAGES_DIR . '/' . $edit_slug . '.php')) {
         .dash-card h3 { margin:0 0 1rem; color:var(--primary); font-size:1.3rem; }
         .dash-number { font-size:2.8rem; font-weight:700; color:var(--accent); margin:0.5rem 0; }
         code { background:#0f172a; padding:0.2rem 0.4rem; border-radius:4px; color:#c084fc; }
+        .homepage-badge { display:inline-flex; align-items:center; gap:0.35rem; color:#fbbf24; background:rgba(251,191,36,0.12); border:1px solid rgba(251,191,36,0.35); padding:0.2rem 0.45rem; border-radius:999px; font-size:0.82rem; margin-left:0.6rem; font-weight:700; }
+        .btn-homepage { background:#f59e0b; border:none; cursor:pointer; }
         .color-preview { display:flex; align-items:center; gap:1rem; margin-top:0.4rem; }
         .color-preview span { font-family:monospace; font-size:0.95rem; color:#94a3b8; }
+        .editor-tools { margin:1rem 0 1.2rem; padding:1rem; border:1px solid var(--gray-200); border-radius:10px; background:#0f172a; }
+        .editor-tools h3 { margin:0 0 0.8rem; color:var(--primary); font-size:1.05rem; }
+        .editor-tool-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:0.7rem; }
+        .editor-tool-btn { border:1px solid var(--gray-200); background:#1e293b; color:#f8fafc; border-radius:8px; padding:0.7rem 0.85rem; text-align:left; cursor:pointer; font-weight:600; transition:0.15s; }
+        .editor-tool-btn:hover { border-color:var(--primary); color:var(--primary); transform:translateY(-1px); }
+        .editor-note { margin-top:0.75rem; color:#94a3b8; font-size:0.92rem; line-height:1.5; }
     </style>
 </head>
 <body>
@@ -590,6 +869,7 @@ if ($edit_slug && file_exists($f = PAGES_DIR . '/' . $edit_slug . '.php')) {
         <a href="admin.php?tab=strony" class="<?= $tab === 'strony' ? 'active' : '' ?>"><i class="fa-solid fa-house"></i> Strony</a>
         <a href="admin.php?tab=menu" class="<?= $tab === 'menu' ? 'active menu-tab' : 'menu-tab' ?>"><i class="fa-solid fa-bars"></i> Menu</a>
         <a href="admin.php?tab=stopka" class="<?= $tab === 'stopka' ? 'active footer-tab' : 'footer-tab' ?>"><i class="fa-solid fa-shoe-prints"></i> Stopka</a>
+		<a href="admin.php?tab=media" class="<?= $tab === 'media' ? 'active' : '' ?>" style="color:#34d399;"><i class="fa-solid fa-images"></i> Media</a>
         <a href="admin.php?tab=ustawienia" class="<?= $tab === 'ustawienia' ? 'active settings-tab' : 'settings-tab' ?>"><i class="fa-solid fa-gear"></i> Ustawienia</a>
         <a href="admin.php?tab=o-cms" class="<?= $tab === 'o-cms' ? 'active about-tab' : 'about-tab' ?>"><i class="fa-solid fa-info-circle"></i> O CMS</a>
         <a href="?logout=1"><i class="fa-solid fa-right-from-bracket"></i> Wyloguj</a>
@@ -700,6 +980,46 @@ if ($edit_slug && file_exists($f = PAGES_DIR . '/' . $edit_slug . '.php')) {
                 <div style="margin-top:2rem;"><button type="submit">Zapisz ustawienia stopki</button></div>
             </form>
         </div>
+	<?php elseif ($tab === 'media'): ?>
+    <div class="card">
+        <h2 style="color:#34d399;"><i class="fa-solid fa-images"></i> Biblioteka Mediów (<?= count($media_files) ?> plików)</h2>
+        
+        <!-- Formularz uploadu -->
+        <form method="post" enctype="multipart/form-data" style="margin:20px 0 30px;">
+            <input type="hidden" name="action" value="upload_media">
+            <input type="file" name="media_files[]" multiple accept="image/*,.pdf,.doc,.docx,video/*" style="margin-bottom:10px;">
+            <button type="submit">📤 Wgraj pliki</button>
+        </form>
+
+        <input type="text" id="media-search" placeholder="🔍 Szukaj plików..." style="width:100%;padding:12px;margin-bottom:20px;border-radius:6px;">
+
+        <div class="media-grid" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 1.2rem;">
+            <?php foreach ($media_files as $f): ?>
+            <div class="media-item" style="background:#1e293b; border:1px solid #334155; border-radius:10px; overflow:hidden;">
+                <div style="height:160px; background:#0f172a; display:flex; align-items:center; justify-content:center;">
+                    <?php if (in_array($f['ext'], ['jpg','jpeg','png','gif','webp','svg'])): ?>
+                        <img src="<?= htmlspecialchars($f['url']) ?>" style="width:100%; height:100%; object-fit:cover;" alt="<?= htmlspecialchars($f['name']) ?>">
+                    <?php else: ?>
+                        <i class="fa-solid fa-file fa-4x" style="color:#64748b;"></i>
+                    <?php endif; ?>
+                </div>
+                <div style="padding:12px;">
+                    <div style="font-weight:600; word-break:break-all; font-size:0.95rem;"><?= htmlspecialchars($f['name']) ?></div>
+                    <small style="color:#94a3b8;"><?= round($f['size']/1024, 1) ?> KB • <?= $f['modified'] ?></small>
+                    <div style="margin-top:12px; display:flex; gap:8px; flex-wrap:wrap;">
+                        <button onclick="copyUrl('<?= htmlspecialchars($f['url']) ?>')" style="background:#3b82f6; color:white; border:none; padding:6px 12px; border-radius:5px; cursor:pointer; font-size:0.9rem;">📋 Kopiuj URL</button>
+                        <form method="post" style="display:inline;" onsubmit="return confirm('Na pewno usunąć ten plik?');">
+                            <input type="hidden" name="action" value="delete_media">
+                            <input type="hidden" name="file" value="<?= htmlspecialchars($f['name']) ?>">
+                            <button type="submit" style="background:#ef4444; color:white; border:none; padding:6px 12px; border-radius:5px; cursor:pointer; font-size:0.9rem;">🗑️ Usuń</button>
+                        </form>
+                    </div>
+                </div>
+            </div>
+            <?php endforeach; ?>
+        </div>
+    </div>
+		
     <?php elseif ($tab === 'ustawienia'): ?>
         <div class="card card-settings">
             <h2 style="margin-top:0; color:var(--settings-color);"><i class="fa-solid fa-gear" style="margin-right:0.6rem;"></i> Ustawienia witryny</h2>
@@ -707,6 +1027,22 @@ if ($edit_slug && file_exists($f = PAGES_DIR . '/' . $edit_slug . '.php')) {
                 <input type="hidden" name="action" value="save_settings">
                 <label for="site_name">Nazwa witryny</label>
                 <input type="text" id="site_name" name="site_name" value="<?= htmlspecialchars(SITE_NAME) ?>" required>
+
+                <div style="margin:2rem 0; padding:1.2rem; border:1px solid var(--gray-200); border-radius:10px; background:#0f172a;">
+                    <h3 style="margin:0 0 0.8rem; color:#fbbf24;"><i class="fa-solid fa-house-chimney"></i> Strona główna witryny</h3>
+                    <p style="color:#94a3b8; margin:0 0 1rem;">Aktualnie jako strona główna ustawiona jest: <strong style="color:#f8fafc;"><?= htmlspecialchars($homepage_slug) ?>.php</strong></p>
+                    <div style="display:flex; gap:1rem; align-items:flex-end; flex-wrap:wrap;">
+                        <div style="flex:1; min-width:240px;">
+                            <label for="homepage_slug" style="margin-top:0;">Wybierz stronę główną</label>
+                            <select id="homepage_slug" name="homepage_slug" style="width:100%;padding:0.75rem 1rem;border:1px solid var(--gray-200);background:#0f172a;color:#f8fafc;border-radius:6px;">
+                                <?php foreach ($pages as $page): ?>
+                                    <option value="<?= htmlspecialchars($page['slug']) ?>" <?= $page['slug'] === $homepage_slug ? 'selected' : '' ?>><?= htmlspecialchars($page['slug']) ?>.php</option>
+                                <?php endforeach; ?>
+                            </select>
+                        </div>
+                        <button type="submit" name="action" value="set_homepage" style="background:#f59e0b;"><i class="fa-solid fa-star"></i> Ustaw jako główną</button>
+                    </div>
+                </div>
                 <div style="margin:2.5rem 0 1.5rem; font-weight:600; color:#94a3b8;">Główne kolory</div>
                 <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap:1.5rem;">
                     <div>
@@ -731,6 +1067,30 @@ if ($edit_slug && file_exists($f = PAGES_DIR . '/' . $edit_slug . '.php')) {
                         </div>
                     </div>
                 </div>
+
+                <div style="margin:2.5rem 0 1.5rem; font-weight:600; color:#94a3b8;">Kolory strony, nagłówka i stopki</div>
+                <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap:1.5rem;">
+                    <div><label for="page_bg">Tło strony</label><div class="color-preview"><input type="color" id="page_bg" name="page_bg" value="<?= htmlspecialchars(theme_value('page-bg', '#f9fafb')) ?>"><span><?= htmlspecialchars(theme_value('page-bg', '#f9fafb')) ?></span></div></div>
+                    <div><label for="page_text">Tekst strony</label><div class="color-preview"><input type="color" id="page_text" name="page_text" value="<?= htmlspecialchars(theme_value('page-text', '#111827')) ?>"><span><?= htmlspecialchars(theme_value('page-text', '#111827')) ?></span></div></div>
+                    <div><label for="header_bg">Tło nagłówka</label><div class="color-preview"><input type="color" id="header_bg" name="header_bg" value="<?= htmlspecialchars(theme_value('header-bg', '#ffffff')) ?>"><span><?= htmlspecialchars(theme_value('header-bg', '#ffffff')) ?></span></div></div>
+                    <div><label for="header_text">Tekst menu</label><div class="color-preview"><input type="color" id="header_text" name="header_text" value="<?= htmlspecialchars(theme_value('header-text', '#374151')) ?>"><span><?= htmlspecialchars(theme_value('header-text', '#374151')) ?></span></div></div>
+                    <div><label for="footer_bg">Tło stopki</label><div class="color-preview"><input type="color" id="footer_bg" name="footer_bg" value="<?= htmlspecialchars(theme_value('footer-bg', '#1f2937')) ?>"><span><?= htmlspecialchars(theme_value('footer-bg', '#1f2937')) ?></span></div></div>
+                    <div><label for="footer_text">Tekst stopki</label><div class="color-preview"><input type="color" id="footer_text" name="footer_text" value="<?= htmlspecialchars(theme_value('footer-text', '#f3f4f6')) ?>"><span><?= htmlspecialchars(theme_value('footer-text', '#f3f4f6')) ?></span></div></div>
+                    <div><label for="footer_muted">Tekst pomocniczy stopki</label><div class="color-preview"><input type="color" id="footer_muted" name="footer_muted" value="<?= htmlspecialchars(theme_value('footer-muted', '#9ca3af')) ?>"><span><?= htmlspecialchars(theme_value('footer-muted', '#9ca3af')) ?></span></div></div>
+                    <div><label for="link_color">Linki</label><div class="color-preview"><input type="color" id="link_color" name="link_color" value="<?= htmlspecialchars(theme_value('link-color', '#a855f7')) ?>"><span><?= htmlspecialchars(theme_value('link-color', '#a855f7')) ?></span></div></div>
+                    <div><label for="button_bg">Tło przycisków</label><div class="color-preview"><input type="color" id="button_bg" name="button_bg" value="<?= htmlspecialchars(theme_value('button-bg', '#a855f7')) ?>"><span><?= htmlspecialchars(theme_value('button-bg', '#a855f7')) ?></span></div></div>
+                    <div><label for="button_text">Tekst przycisków</label><div class="color-preview"><input type="color" id="button_text" name="button_text" value="<?= htmlspecialchars(theme_value('button-text', '#ffffff')) ?>"><span><?= htmlspecialchars(theme_value('button-text', '#ffffff')) ?></span></div></div>
+                </div>
+
+                <div style="margin:2.5rem 0 1.5rem; font-weight:600; color:#94a3b8;">Style i układ</div>
+                <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap:1.5rem;">
+                    <div><label for="font_family">Font CSS</label><input type="text" id="font_family" name="font_family" value="<?= htmlspecialchars(theme_value('font-family', 'system-ui, sans-serif')) ?>"></div>
+                    <div><label for="header_height">Wysokość nagłówka [px]</label><input type="text" id="header_height" name="header_height" value="<?= htmlspecialchars(theme_value('header-height', '74')) ?>"></div>
+                    <div><label for="logo_height">Maks. wysokość logo [px]</label><input type="text" id="logo_height" name="logo_height" value="<?= htmlspecialchars(theme_value('logo-height', '100')) ?>"></div>
+                    <div><label for="content_width">Szerokość treści [px]</label><input type="text" id="content_width" name="content_width" value="<?= htmlspecialchars(theme_value('content-width', '1240')) ?>"></div>
+                    <div><label for="border_radius">Zaokrąglenia [px]</label><input type="text" id="border_radius" name="border_radius" value="<?= htmlspecialchars(theme_value('border-radius', '10')) ?>"></div>
+                    <div><label style="display:flex;align-items:center;gap:0.8rem;margin-top:2.1rem;"><input type="checkbox" name="shadow_enabled" <?= theme_value('shadow-enabled', '1') === '1' ? 'checked' : '' ?> style="width:auto;transform:scale(1.2);"> Cień nagłówka</label></div>
+                </div>
                 <div style="margin-top:3rem;">
                     <label for="logo_upload">Logo witryny</label>
                     <input type="file" id="logo_upload" name="logo" accept="image/png,image/jpeg,image/svg+xml,image/gif">
@@ -745,6 +1105,30 @@ if ($edit_slug && file_exists($f = PAGES_DIR . '/' . $edit_slug . '.php')) {
                 </div>
                 <div style="margin-top:3rem; text-align:center;"><button type="submit"><i class="fa-solid fa-floppy-disk"></i> Zapisz ustawienia</button></div>
             </form>
+
+            <!-- ==================== ZMIANA HASŁA ==================== -->
+            <div style="margin: 3rem 0 2rem; padding: 1.8rem; border: 2px solid #334155; border-radius: 12px; background: #0f172a;">
+                <h3 style="margin-top:0; color: #f87171;"><i class="fa-solid fa-key"></i> Zmiana hasła administratora</h3>
+                <p style="color:#94a3b8; margin-bottom:1.5rem;">Zalecane co 3–6 miesięcy. Wymagane stare hasło.</p>
+
+                <form method="post">
+                    <input type="hidden" name="action" value="change_password">
+
+                    <label for="old_password">Stare hasło</label>
+                    <input type="password" id="old_password" name="old_password" required autocomplete="current-password">
+
+                    <label for="new_password">Nowe hasło (min. 6 znaków)</label>
+                    <input type="password" id="new_password" name="new_password" required minlength="6" autocomplete="new-password">
+
+                    <label for="confirm_password">Powtórz nowe hasło</label>
+                    <input type="password" id="confirm_password" name="confirm_password" required minlength="6" autocomplete="new-password">
+
+                    <div style="margin-top: 1.8rem;">
+                        <button type="submit" style="background:#ef4444;">Zmień hasło</button>
+                    </div>
+                </form>
+            </div>
+
             <form method="post" style="margin-top:2rem; text-align:center; border-top:1px solid var(--gray-200); padding-top:1.5rem;">
                 <input type="hidden" name="action" value="export_all">
                 <button type="submit" class="btn-full-export"><i class="fa-solid fa-download"></i> Eksport całej witryny (ZIP)</button>
@@ -794,6 +1178,7 @@ if ($edit_slug && file_exists($f = PAGES_DIR . '/' . $edit_slug . '.php')) {
     <?php else: ?>
         <div class="card">
             <h2>Twoje strony (<?= count($pages) ?>)</h2>
+            <p style="color:#94a3b8;margin:0.4rem 0 1rem;">Aktywna strona główna: <strong style="color:#fbbf24;"><?= htmlspecialchars($homepage_slug) ?>.php</strong></p>
             <table>
                 <thead>
                     <tr><th>Slug / Plik</th><th>Modyfikacja</th><th>Podgląd</th><th>Akcje</th></tr>
@@ -803,15 +1188,24 @@ if ($edit_slug && file_exists($f = PAGES_DIR . '/' . $edit_slug . '.php')) {
                 <tr>
                     <td>
                         <code><?= htmlspecialchars($page['slug']) ?>.php</code>
-                        <?php if ($page['slug'] === 'index'): ?>
-                            <span style="color:var(--success);font-size:0.9rem;margin-left:0.6rem;">(strona główna)</span>
+                        <?php if ($page['slug'] === $homepage_slug): ?>
+                            <span class="homepage-badge"><i class="fa-solid fa-star"></i> strona główna</span>
+                        <?php elseif ($page['slug'] === 'index'): ?>
+                            <span style="color:var(--success);font-size:0.9rem;margin-left:0.6rem;">(index)</span>
                         <?php endif; ?>
                     </td>
                     <td><?= $page['modified'] ?></td>
                     <td><a href="<?= htmlspecialchars(PAGES_URL . $page['slug'] . '.php') ?>" target="_blank" class="btn btn-view"><i class="fa-solid fa-eye"></i> Podgląd</a></td>
                     <td>
                         <a href="admin.php?tab=strony&edit=<?= urlencode($page['slug']) ?>" class="btn btn-edit"><i class="fa-solid fa-pen-to-square"></i> Edytuj</a>
-                        <?php if ($page['slug'] !== 'index'): ?>
+                        <?php if ($page['slug'] !== $homepage_slug): ?>
+                        <form method="post" style="display:inline;">
+                            <input type="hidden" name="action" value="set_homepage">
+                            <input type="hidden" name="slug" value="<?= htmlspecialchars($page['slug']) ?>">
+                            <button type="submit" class="btn btn-homepage"><i class="fa-solid fa-star"></i> Główna</button>
+                        </form>
+                        <?php endif; ?>
+                        <?php if ($page['slug'] !== 'index' && $page['slug'] !== $homepage_slug): ?>
                         <form method="post" style="display:inline;" onsubmit="return confirm('Na pewno usunąć?');">
                             <input type="hidden" name="action" value="delete">
                             <input type="hidden" name="slug" value="<?= htmlspecialchars($page['slug']) ?>">
@@ -830,6 +1224,7 @@ if ($edit_slug && file_exists($f = PAGES_DIR . '/' . $edit_slug . '.php')) {
             <form method="post">
                 <input type="hidden" name="action" value="edit">
                 <input type="hidden" name="slug" value="<?= htmlspecialchars($edit_slug) ?>">
+                <?php render_editor_tools(); ?>
                 <textarea name="content" class="editor"><?= htmlspecialchars($edit_content) ?></textarea>
                 <div style="margin-top:1.6rem;">
                     <button type="submit"><i class="fa-solid fa-floppy-disk"></i> Zapisz zmiany</button>
@@ -847,11 +1242,64 @@ if ($edit_slug && file_exists($f = PAGES_DIR . '/' . $edit_slug . '.php')) {
                 <label>Tytuł strony</label>
                 <input type="text" name="title" required placeholder="np. Kontakt">
                 <label>Treść strony</label>
+                <?php render_editor_tools(); ?>
                 <textarea name="content" class="editor"><p>Wpisz zawartość...</p></textarea>
                 <div style="margin-top:1.6rem;"><button type="submit"><i class="fa-solid fa-plus"></i> Utwórz stronę</button></div>
             </form>
         </div>
     <?php endif; ?>
 </main>
+<script>
+document.querySelectorAll('input[type="color"]').forEach(function(input){
+    const span = input.parentElement ? input.parentElement.querySelector('span') : null;
+    input.addEventListener('input', function(){ if(span) span.textContent = input.value; });
+});
+</script>
+<script>
+(function(){
+    const snippets = {
+        hero: '<section class="cms-hero"><h1>Duży nagłówek strony</h1><p>Krótki opis, hasło reklamowe lub wprowadzenie do podstrony.</p><p><a class="cms-btn" href="#kontakt">Skontaktuj się</a></p></section>',
+        button: '<p><a class="cms-btn" href="/kontakt">Przycisk / wezwanie do działania</a></p>',
+        columns: '<div class="cms-columns"><div><h2>Lewa kolumna</h2><p>Treść pierwszej kolumny.</p></div><div><h2>Prawa kolumna</h2><p>Treść drugiej kolumny.</p></div></div>',
+        cards: '<div class="cms-card-grid"><article class="cms-card"><h3>Usługa 1</h3><p>Opis usługi.</p></article><article class="cms-card"><h3>Usługa 2</h3><p>Opis usługi.</p></article><article class="cms-card"><h3>Usługa 3</h3><p>Opis usługi.</p></article></div>',
+        gallery: '<div class="cms-gallery"><img src="/uploads/zdjecie-1.jpg" alt="Opis zdjęcia"><img src="/uploads/zdjecie-2.jpg" alt="Opis zdjęcia"><img src="/uploads/zdjecie-3.jpg" alt="Opis zdjęcia"></div>',
+        faq: '<section class="cms-faq"><h2>Najczęstsze pytania</h2><details open><summary>Pytanie numer 1</summary><p>Odpowiedź na pytanie.</p></details><details><summary>Pytanie numer 2</summary><p>Odpowiedź na pytanie.</p></details></section>',
+        contact: '<section id="kontakt" class="cms-contact"><h2>Kontakt</h2><p><strong>Telefon:</strong> 000 000 000</p><p><strong>Email:</strong> kontakt@example.com</p><p><strong>Adres:</strong> wpisz adres firmy</p></section>',
+        separator: '<hr style="margin:2.5rem 0;border:0;border-top:1px solid #e5e7eb;">'
+    };
+    document.querySelectorAll('[data-snippet]').forEach(function(btn){
+        btn.addEventListener('click', function(){
+            const key = btn.getAttribute('data-snippet');
+            const html = snippets[key] || '';
+            const editor = tinymce.activeEditor || (tinymce.editors && tinymce.editors[0]);
+            if (editor && html) {
+                editor.execCommand('mceInsertContent', false, html);
+                editor.focus();
+            }
+        });
+    });
+})();
+</script>
+<script>
+function copyUrl(url) {
+    navigator.clipboard.writeText(url).then(() => {
+        alert('✅ URL skopiowany do schowka!');
+    });
+}
+
+// Wyszukiwanie
+document.addEventListener('DOMContentLoaded', () => {
+    const search = document.getElementById('media-search');
+    if (search) {
+        search.addEventListener('input', function() {
+            const term = this.value.toLowerCase();
+            document.querySelectorAll('.media-item').forEach(item => {
+                const name = item.textContent.toLowerCase();
+                item.style.display = name.includes(term) ? '' : 'none';
+            });
+        });
+    }
+});
+</script>
 </body>
 </html>

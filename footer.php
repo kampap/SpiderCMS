@@ -4,6 +4,14 @@ if (!file_exists(__DIR__ . '/.footer_enabled')) {
 }
 $f_data = file_exists(__DIR__ . '/.footer.json') ? json_decode(file_get_contents(__DIR__ . '/.footer.json'), true) : [];
 ?>
+<style>
+.site-footer{ text-align:justify; }
+.site-footer .footer-container{ text-align:justify; }
+.site-footer .footer-col,
+.site-footer .footer-col p,
+.site-footer .footer-bottom{ text-align:justify; }
+.site-footer .footer-col h4{ text-align:left; }
+</style>
 <footer class="site-footer">
   <div class="footer-container">
     <div class="footer-col">
