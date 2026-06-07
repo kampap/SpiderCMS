@@ -2,7 +2,7 @@
 $chat_settings_file = __DIR__ . '/.chat/settings.json';
 $chat_settings = file_exists($chat_settings_file) ? json_decode(file_get_contents($chat_settings_file), true) : [];
 if (!is_array($chat_settings)) $chat_settings = [];
-$chat_enabled = ($chat_settings['enabled'] ?? '0') === '1';
+$chat_enabled = ($chat_settings['enabled'] ?? '1') === '1';
 if (!$chat_enabled) return;
 $chat_title = $chat_settings['title'] ?? 'Masz pytanie?';
 $chat_subtitle = $chat_settings['subtitle'] ?? 'Napisz do nas. Odpowiemy możliwie szybko.';

@@ -150,6 +150,12 @@ $login_error = '';
 // ----------------------------------------------------------------------
 $settings_file = __DIR__ . '/.settings.json';
 $settings = file_exists($settings_file) ? json_decode(file_get_contents($settings_file), true) : [];
+if (!is_array($settings)) {
+    $settings = [];
+}
+if (!array_key_exists('header_enabled', $settings)) {
+    $settings['header_enabled'] = '1';
+}
 
 // Jako domyślne logo ustawiamy nową grafikę z pająkiem
 $logo_url = $settings['logo'] ?? (BASE_URL . 'assets/images/spidercms-icon.png');
@@ -178,6 +184,7 @@ $theme_defaults = [
     'content-width' => '1240',
     'border-radius' => '10',
     'shadow-enabled' => '1',
+    'menu-position' => 'right',
 ];
 $theme_loaded = file_exists($theme_file) ? json_decode(file_get_contents($theme_file), true) : [];
 if (!is_array($theme_loaded)) $theme_loaded = [];
@@ -971,6 +978,8 @@ function update_all_pages_colors() {
         " --content-width: " . css_px($theme['content-width'] ?? '1240', 1240) . ";\n" .
         " --radius: " . css_px($theme['border-radius'] ?? '10', 10) . ";\n" .
         " --header-shadow: " . (!empty($theme['shadow-enabled']) ? '0 2px 10px rgba(0,0,0,0.08)' : 'none') . ";\n" .
+        " --menu-position: " . (($theme['menu-position'] ?? 'right')) . ";\n" .
+        " --spidercms-logo-max-height: min(var(--logo-height,100px), calc(var(--header-height,74px) - 14px));\n" .
         " --gray50: #f9fafb;\n" .
         " --gray800: #1f2937;\n" .
         "}";
@@ -986,6 +995,342 @@ function update_all_pages_colors() {
     }
     return $updated;
 }
+
+
+// ----------------------------------------------------------------------
+// Widoczność nagłówka systemowego – MINIMALNA POPRAWKA
+// Nie zmienia HTML ani CSS nagłówka. Tylko decyduje, czy wczytać istniejący header.php.
+// Dodatkowo przygotowuje zmienne używane przez obecny header.php: $logo_url, $menu_enabled, $menu_items.
+// ----------------------------------------------------------------------
+function spidercms_header_bootstrap_block($depth) {
+    $depth = (int)$depth;
+    return "<?php\n" .
+        "require_once dirname(__DIR__, {$depth}) . '/config.php';\n" .
+        "\$spidercms_root_dir = dirname(__DIR__, {$depth});\n" .
+        "\$settings_file = \$spidercms_root_dir . '/.settings.json';\n" .
+        "\$settings = file_exists(\$settings_file) ? json_decode((string)file_get_contents(\$settings_file), true) : [];\n" .
+        "if (!is_array(\$settings)) { \$settings = []; }\n" .
+        "if (!array_key_exists('header_enabled', \$settings)) { \$settings['header_enabled'] = '1'; }\n" .
+        "\$logo_url = \$settings['logo'] ?? ((defined('BASE_URL') ? BASE_URL : '') . 'assets/images/spidercms-icon.png');\n" .
+        "\$menu_enabled = file_exists(\$spidercms_root_dir . '/.menu_enabled');\n" .
+        "\$menu_items = json_decode(@file_get_contents(\$spidercms_root_dir . '/.menu.json') ?: '[]', true);\n" .
+        "if (!is_array(\$menu_items)) { \$menu_items = []; }\n" .
+        "if ((string)(\$settings['header_enabled'] ?? '1') === '1') {\n" .
+        "    require_once \$spidercms_root_dir . '/header.php';\n" .
+        "}\n" .
+        "?>";
+}
+
+function spidercms_sync_header_bootstrap_in_pages() {
+    if (!defined('ACTIVE_PAGES_DIR')) return 0;
+    $depth = defined('ACTIVE_PAGES_DEPTH') ? (int)ACTIVE_PAGES_DEPTH : 1;
+    $block = spidercms_header_bootstrap_block($depth);
+    $updated = 0;
+
+    foreach (glob(ACTIVE_PAGES_DIR . '/*.php') ?: [] as $file) {
+        $content = file_get_contents($file);
+        $original = $content;
+
+        // Naprawa wersji standardowej: config.php + header.php na początku pliku.
+        $content = preg_replace(
+            "~<\\?php\\s*require_once\\s+dirname\\(__DIR__,\\s*\\d+\\)\\s*\\.\\s*'/config\\.php';\\s*require_once\\s+dirname\\(__DIR__,\\s*\\d+\\)\\s*\\.\\s*'/header\\.php';~s",
+            rtrim($block, "?>") ,
+            $content,
+            1
+        );
+
+        // Naprawa prostszej wersji: samo require header.php.
+        if (strpos($content, "'/header.php'") !== false && strpos($content, '$logo_url =') === false) {
+            $content = preg_replace(
+                "~<\\?php\\s*require_once\\s+dirname\\(__DIR__,\\s*\\d+\\)\\s*\\.\\s*'/header\\.php';\\s*\\?>~s",
+                $block,
+                $content,
+                1
+            );
+        }
+
+        // Jeżeli wcześniejsza poprawka dodała warunek bez zmiennych, dopiszemy zmienne przed require header.php.
+        if (strpos($content, '$spidercms_header_enabled') !== false && strpos($content, '$logo_url =') === false) {
+            $content = str_replace(
+                "if (\$spidercms_header_enabled) {\n    require_once \$spidercms_root_dir . '/header.php';\n}",
+                "if (!function_exists('spidercms_header_public_url')) { function spidercms_header_public_url(\$url) { \$url = trim((string)\$url); if (\$url === '') return ''; if (preg_match('~^(https?:)?//|^data:|^mailto:|^tel:|^/~i', \$url)) return \$url; \$base = defined('BASE_URL') ? trim((string)BASE_URL) : ''; if (\$base === '') { \$base = '/'; } return rtrim(\$base, '/') . '/' . ltrim(\$url, '/'); } }\n\$logo_url = \$spidercms_settings['logo'] ?? ((defined('BASE_URL') ? BASE_URL : '') . 'assets/images/spidercms-icon.png');\n\$logo_url = spidercms_header_public_url(\$logo_url);\n\$menu_enabled = file_exists(\$spidercms_root_dir . '/.menu_enabled');\n\$menu_items = json_decode(@file_get_contents(\$spidercms_root_dir . '/.menu.json') ?: '[]', true);\nif (!is_array(\$menu_items)) { \$menu_items = []; }\nif (\$spidercms_header_enabled) {\n    require_once \$spidercms_root_dir . '/header.php';\n}",
+                $content
+            );
+        }
+
+        if ($content !== $original) {
+            file_put_contents($file, $content);
+            $updated++;
+        }
+    }
+    return $updated;
+}
+
+
+// ----------------------------------------------------------------------
+// Naprawa przezroczystego nagłówka na stronie głównej / istniejących stronach
+// Nie zmienia układu nagłówka. Dodaje tylko końcową regułę CSS, która ma
+// pierwszeństwo nad ewentualnym przezroczystym stylem na stronie głównej.
+// ----------------------------------------------------------------------
+function spidercms_fix_opaque_header_in_pages() {
+    $updated = 0;
+    $files = [];
+
+    // Aktywny folder stron.
+    if (defined('ACTIVE_PAGES_DIR')) {
+        foreach (glob(ACTIVE_PAGES_DIR . '/*.php') ?: [] as $file) {
+            $files[] = $file;
+        }
+    }
+
+    // Root index.php też może być stroną główną albo własnym szablonem.
+    $root_index = __DIR__ . '/index.php';
+    if (is_file($root_index)) {
+        $files[] = $root_index;
+    }
+
+    // Dodatkowo poprawiamy typowe foldery z podstronami, bo użytkownik mógł zmienić folder stron.
+    foreach (spidercms_available_page_folders() as $folder) {
+        $dir = spidercms_page_folder_dir($folder);
+        foreach (glob($dir . '/*.php') ?: [] as $file) {
+            $files[] = $file;
+        }
+    }
+
+    $files = array_values(array_unique($files));
+
+    $fix_css = <<<'CSS'
+<style id="spidercms-header-opaque-fix">
+/*
+   SpiderCMS: ujednolicenie wyglądu nagłówka na stronie głównej.
+   Ta poprawka NIE przenosi header.php i NIE zmienia struktury strony.
+   Nadpisuje tylko style, które na stronie głównej mogły robić nagłówek
+   półprzezroczysty albo inny niż na pozostałych podstronach.
+*/
+:root{
+    --spidercms-header-solid-bg: var(--header-bg,#ffffff);
+    --spidercms-header-solid-text: var(--header-text,#374151);
+}
+body .site-header{
+    position:fixed!important;
+    top:0!important;
+    left:0!important;
+    right:0!important;
+    z-index:1000!important;
+    background:var(--spidercms-header-solid-bg)!important;
+    background-color:var(--spidercms-header-solid-bg)!important;
+    opacity:1!important;
+    filter:none!important;
+    backdrop-filter:none!important;
+    -webkit-backdrop-filter:none!important;
+    box-shadow:var(--header-shadow,0 2px 10px rgba(0,0,0,.08))!important;
+    text-align:left!important;
+}
+body .site-header::before,
+body .site-header::after{
+    display:none!important;
+    content:none!important;
+    opacity:1!important;
+    filter:none!important;
+    backdrop-filter:none!important;
+    -webkit-backdrop-filter:none!important;
+}
+body .site-header .header-container{
+    max-width:var(--content-width,1240px)!important;
+    margin:0 auto!important;
+    padding:0 1.5rem!important;
+    display:flex!important;
+    justify-content:space-between!important;
+    align-items:center!important;
+    height:var(--header-height,74px)!important;
+    min-height:var(--header-height,74px)!important;
+    background:transparent!important;
+    text-align:left!important;
+}
+body .site-header.menu-left .header-container,
+body .site-header.menu-center .header-container,
+body .site-header.menu-right .header-container{
+    justify-content:flex-start!important;
+}
+body .site-header .logo{
+    font-weight:700!important;
+    font-size:1.4rem!important;
+    color:var(--primary,#a855f7)!important;
+    text-decoration:none!important;
+    display:flex!important;
+    align-items:center!important;
+    justify-content:flex-start!important;
+    text-align:left!important;
+    margin-right:auto!important;
+    height:100%!important;
+}
+body .site-header.menu-left .logo,
+body .site-header.menu-center .logo{
+    margin-right:1.5rem!important;
+}
+body .site-header.menu-right .logo{
+    margin-right:auto!important;
+}
+body .site-header .logo img{
+    max-height:min(var(--logo-height,100px), calc(var(--header-height,74px) - 14px))!important;
+    height:auto!important;
+    width:auto!important;
+    max-width:min(260px, 40vw)!important;
+    object-fit:contain!important;
+    display:block!important;
+    margin:0!important;
+    opacity:1!important;
+    filter:none!important;
+}
+body .site-header .nav-menu{
+    display:flex!important;
+    gap:2rem!important;
+    align-items:center!important;
+    background:transparent!important;
+}
+body .site-header.menu-left .nav-menu{
+    margin-left:0!important;
+    margin-right:auto!important;
+}
+body .site-header.menu-center .nav-menu{
+    margin-left:auto!important;
+    margin-right:auto!important;
+}
+body .site-header.menu-right .nav-menu{
+    margin-left:auto!important;
+    margin-right:0!important;
+}
+body .site-header .nav-menu a{
+    color:var(--spidercms-header-solid-text)!important;
+    text-decoration:none!important;
+    font-weight:500!important;
+    padding:.5rem 1rem!important;
+    display:flex!important;
+    align-items:center!important;
+    gap:.5rem!important;
+    background:transparent!important;
+}
+body .site-header .nav-menu a:hover{
+    color:var(--primary,#a855f7)!important;
+}
+body .site-header .menu-toggle{
+    color:var(--spidercms-header-solid-text)!important;
+}
+@media (max-width:768px){
+    body .site-header .nav-menu{
+        display:none!important;
+        position:absolute!important;
+        top:var(--header-height,74px)!important;
+        left:0!important;
+        right:0!important;
+        flex-direction:column!important;
+        padding:1.5rem!important;
+        background:var(--spidercms-header-solid-bg)!important;
+        box-shadow:0 6px 16px rgba(0,0,0,.1)!important;
+    }
+    body .site-header .nav-menu.active{
+        display:flex!important;
+    }
+    body .site-header .menu-toggle{
+        display:block!important;
+    }
+}
+</style>
+CSS;
+
+    foreach ($files as $file) {
+        if (!is_file($file) || basename($file) === 'admin.php') {
+            continue;
+        }
+
+        $content = file_get_contents($file);
+        $original = $content;
+
+        // Usuń starszą wersję poprawki, żeby nie dublować kodu.
+        $content = preg_replace('~<style\s+id=["\']spidercms-header-opaque-fix["\'][^>]*>.*?</style>\s*~is', '', $content);
+
+        // Popraw znane warianty definicji .site-header.
+        $content = str_replace(
+            '.site-header{position:fixed;top:0;left:0;right:0;background:var(--header-bg);box-shadow:var(--header-shadow);z-index:1000;text-align:left;}',
+            '.site-header{position:fixed;top:0;left:0;right:0;background:var(--header-bg,#ffffff)!important;background-color:var(--header-bg,#ffffff)!important;opacity:1!important;backdrop-filter:none!important;-webkit-backdrop-filter:none!important;box-shadow:var(--header-shadow);z-index:1000;text-align:left;}',
+            $content
+        );
+
+        // Najważniejsze: dodaj regułę na końcu sekcji HEAD, aby wygrała z wcześniejszym CSS strony głównej.
+        if (stripos($content, '</head>') !== false) {
+            $content = str_ireplace('</head>', $fix_css . "\n</head>", $content);
+        } elseif (stripos($content, '<body') !== false) {
+            $content = preg_replace('~(<body\b[^>]*>)~i', $fix_css . "\n$1", $content, 1);
+        }
+
+        if ($content !== $original) {
+            file_put_contents($file, $content);
+            $updated++;
+        }
+    }
+
+    return $updated;
+}
+
+// Automatyczna, lekka naprawa przy wejściu do panelu – działa tylko na plikach stron.
+spidercms_fix_opaque_header_in_pages();
+
+
+// ----------------------------------------------------------------------
+// AWARYJNA NAPRAWA PO POPRZEDNIEJ WERSJI
+// Cofnięcie przeniesienia nagłówka do <body>, które mogło powodować puste strony.
+// Przywraca układ generowany wcześniej przez SpiderCMS: bootstrap nagłówka na początku pliku,
+// a w <body> zostaje tylko komentarz zastępczy.
+// ----------------------------------------------------------------------
+function spidercms_repair_pages_after_header_body_move() {
+    if (!function_exists('spidercms_header_bootstrap_block')) return 0;
+
+    $files = [];
+    if (defined('ACTIVE_PAGES_DIR')) {
+        foreach (glob(ACTIVE_PAGES_DIR . '/*.php') ?: [] as $file) $files[] = $file;
+    }
+    foreach (spidercms_available_page_folders() as $folder) {
+        $dir = spidercms_page_folder_dir($folder);
+        foreach (glob($dir . '/*.php') ?: [] as $file) $files[] = $file;
+    }
+    $files = array_values(array_unique($files));
+    $updated = 0;
+
+    foreach ($files as $file) {
+        if (!is_file($file) || basename($file) === 'admin.php') continue;
+        $content = file_get_contents($file);
+        $original = $content;
+        $depth = substr_count(str_replace('\\', '/', dirname($file)), '/') - substr_count(str_replace('\\', '/', __DIR__), '/');
+        if ($depth < 1) $depth = defined('ACTIVE_PAGES_DEPTH') ? (int)ACTIVE_PAGES_DEPTH : 1;
+
+        // Usuń blok nagłówka, który poprzednia wersja mogła wstawić bezpośrednio po <body>.
+        $content = preg_replace(
+            '~<body>\s*<\?php\s*require_once\s+dirname\(__DIR__,\s*\d+\)\s*\.\s*[\'\"]/config\.php[\'\"];.*?require_once\s+\$spidercms_root_dir\s*\.\s*[\'\"]/header\.php[\'\"];\s*\}\s*\?>~is',
+            "<body>\n<?php // Nagłówek wczytany z header.php ?>",
+            $content,
+            1
+        );
+
+        // Jeśli przed DOCTYPE nie ma już ładowania header.php, dopisz standardowy bootstrap nagłówka na początku pliku.
+        $before_doctype = $content;
+        $pos = stripos($content, '<!DOCTYPE');
+        if ($pos !== false) $before_doctype = substr($content, 0, $pos);
+
+        if (strpos($before_doctype, 'header.php') === false && preg_match('~^<\?php\s*~', $content)) {
+            $block = spidercms_header_bootstrap_block($depth);
+            $inner = trim(preg_replace('~^<\?php|\?>$~', '', $block));
+            $content = preg_replace('~^<\?php\s*~', "<?php\n" . $inner . "\n", $content, 1);
+        }
+
+        if ($content !== $original) {
+            file_put_contents($file, $content);
+            $updated++;
+        }
+    }
+    return $updated;
+}
+
+spidercms_repair_pages_after_header_body_move();
 
 // ----------------------------------------------------------------------
 // Funkcja zapisująca przekierowanie strony głównej
@@ -1007,6 +1352,126 @@ function write_homepage_redirect($slug) {
 
     return file_put_contents($index_path, $content) !== false;
 }
+
+
+// ----------------------------------------------------------------------
+// Nagłówek z obsługą podmenu
+// Zachowuje dotychczasowe klasy: site-header, header-container, logo, nav-menu, menu-toggle.
+// Dzięki temu istniejący styl nagłówka nadal działa tak jak wcześniej.
+// ----------------------------------------------------------------------
+function spidercms_menu_icon_html($icon) {
+    $icon = trim((string)$icon);
+    if ($icon === '') return '';
+    if (preg_match('~^(https?:)?//|^/|\.(png|jpe?g|gif|webp|svg)$~i', $icon)) {
+        return '<img src="' . htmlspecialchars($icon, ENT_QUOTES, 'UTF-8') . '" alt="">';
+    }
+    return '<i class="' . htmlspecialchars($icon, ENT_QUOTES, 'UTF-8') . '"></i>';
+}
+
+function spidercms_write_header_with_submenu_support() {
+    $header = <<<'PHP'
+<?php
+if (!defined('SITE_NAME')) {
+    require_once __DIR__ . '/config.php';
+}
+
+$settings_file = __DIR__ . '/.settings.json';
+$settings = file_exists($settings_file) ? json_decode((string)file_get_contents($settings_file), true) : [];
+if (!is_array($settings)) $settings = [];
+
+if (!function_exists('spidercms_header_public_url')) {
+    function spidercms_header_public_url($url) {
+        $url = trim((string)$url);
+        if ($url === '') return '';
+        if (preg_match('~^(https?:)?//|^data:|^mailto:|^tel:|^/~i', $url)) return $url;
+        $base = defined('BASE_URL') ? trim((string)BASE_URL) : '';
+        if ($base === '') {
+            $base = '/';
+        }
+        return rtrim($base, '/') . '/' . ltrim($url, '/');
+    }
+}
+
+$logo_url = $logo_url ?? ($settings['logo'] ?? ((defined('BASE_URL') ? BASE_URL : '') . 'assets/images/spidercms-icon.png'));
+$logo_url = spidercms_header_public_url($logo_url);
+$menu_enabled = $menu_enabled ?? file_exists(__DIR__ . '/.menu_enabled');
+$menu_items = $menu_items ?? json_decode(@file_get_contents(__DIR__ . '/.menu.json') ?: '[]', true);
+if (!is_array($menu_items)) $menu_items = [];
+
+$theme_file = __DIR__ . '/.theme.json';
+$theme = file_exists($theme_file) ? json_decode((string)file_get_contents($theme_file), true) : [];
+if (!is_array($theme)) $theme = [];
+$menu_position = $theme['menu-position'] ?? 'right';
+if (!in_array($menu_position, ['left','center','right'], true)) $menu_position = 'right';
+
+if (!function_exists('spidercms_header_icon_html')) {
+    function spidercms_header_icon_html($icon) {
+        $icon = trim((string)$icon);
+        if ($icon === '') return '';
+        if (preg_match('~^(https?:)?//|^/|\.(png|jpe?g|gif|webp|svg)$~i', $icon)) {
+            if (function_exists('spidercms_header_public_url')) {
+                $icon = spidercms_header_public_url($icon);
+            }
+            return '<img src="' . htmlspecialchars($icon, ENT_QUOTES, 'UTF-8') . '" alt="">';
+        }
+        return '<i class="' . htmlspecialchars($icon, ENT_QUOTES, 'UTF-8') . '"></i>';
+    }
+}
+?>
+<style id="spidercms-submenu-style">
+.nav-item{position:relative;display:flex;align-items:center}.nav-item>a{white-space:nowrap}.nav-item.has-submenu>a::after{content:"▾";font-size:.72em;margin-left:.35rem;opacity:.75}.submenu{display:none;position:absolute;left:0;top:100%;min-width:220px;background:var(--header-bg,#fff);box-shadow:0 14px 35px rgba(0,0,0,.16);border:1px solid rgba(0,0,0,.08);border-radius:12px;padding:.45rem;z-index:1005}.nav-item.has-submenu:hover>.submenu,.nav-item.has-submenu:focus-within>.submenu{display:flex;flex-direction:column;gap:.15rem}.submenu a{display:flex;align-items:center;gap:.5rem;padding:.65rem .8rem;border-radius:10px;color:var(--header-text,#374151);text-decoration:none;white-space:nowrap}.submenu a:hover{background:rgba(168,85,247,.10);color:var(--primary,#a855f7)}@media(max-width:768px){.nav-item{width:100%;display:block}.submenu{position:static;display:flex;flex-direction:column;box-shadow:none;border:0;background:rgba(0,0,0,.03);margin:.2rem 0 .4rem 1rem;min-width:0}.submenu a{white-space:normal}}
+</style>
+<header class="site-header menu-<?= htmlspecialchars($menu_position, ENT_QUOTES, 'UTF-8') ?>">
+    <div class="header-container">
+        <a href="<?= htmlspecialchars((defined('BASE_URL') ? BASE_URL : '') ?: '/', ENT_QUOTES, 'UTF-8') ?>" class="logo">
+            <?php if (!empty($logo_url)): ?>
+                <img src="<?= htmlspecialchars($logo_url, ENT_QUOTES, 'UTF-8') ?>" alt="<?= htmlspecialchars(defined('SITE_NAME') ? SITE_NAME : 'Logo', ENT_QUOTES, 'UTF-8') ?>">
+            <?php else: ?>
+                <?= htmlspecialchars(defined('SITE_NAME') ? SITE_NAME : 'SpiderCMS', ENT_QUOTES, 'UTF-8') ?>
+            <?php endif; ?>
+        </a>
+
+        <?php if ($menu_enabled && !empty($menu_items)): ?>
+            <nav class="nav-menu" id="spidercms-nav-menu">
+                <?php foreach ($menu_items as $item): ?>
+                    <?php
+                    $label = trim((string)($item['label'] ?? ''));
+                    $url = trim((string)($item['url'] ?? '#'));
+                    $icon = trim((string)($item['icon'] ?? ''));
+                    $children = is_array($item['children'] ?? null) ? $item['children'] : [];
+                    if ($label === '' && $url === '') continue;
+                    ?>
+                    <?php if (!empty($children)): ?>
+                        <div class="nav-item has-submenu">
+                            <a href="<?= htmlspecialchars($url ?: '#', ENT_QUOTES, 'UTF-8') ?>"><?= spidercms_header_icon_html($icon) ?><?= htmlspecialchars($label, ENT_QUOTES, 'UTF-8') ?></a>
+                            <div class="submenu">
+                                <?php foreach ($children as $child): ?>
+                                    <?php
+                                    $child_label = trim((string)($child['label'] ?? ''));
+                                    $child_url = trim((string)($child['url'] ?? '#'));
+                                    $child_icon = trim((string)($child['icon'] ?? ''));
+                                    if ($child_label === '' && $child_url === '') continue;
+                                    ?>
+                                    <a href="<?= htmlspecialchars($child_url ?: '#', ENT_QUOTES, 'UTF-8') ?>"><?= spidercms_header_icon_html($child_icon) ?><?= htmlspecialchars($child_label, ENT_QUOTES, 'UTF-8') ?></a>
+                                <?php endforeach; ?>
+                            </div>
+                        </div>
+                    <?php else: ?>
+                        <a href="<?= htmlspecialchars($url ?: '#', ENT_QUOTES, 'UTF-8') ?>"><?= spidercms_header_icon_html($icon) ?><?= htmlspecialchars($label, ENT_QUOTES, 'UTF-8') ?></a>
+                    <?php endif; ?>
+                <?php endforeach; ?>
+            </nav>
+            <div class="menu-toggle" onclick="document.getElementById('spidercms-nav-menu')?.classList.toggle('active')">☰</div>
+        <?php endif; ?>
+    </div>
+</header>
+PHP;
+    @file_put_contents(__DIR__ . '/header.php', $header);
+}
+
+// Automatycznie odśwież header.php po wejściu do panelu, żeby naprawić ścieżki logo
+// bez potrzeby ponownego zapisywania ustawień.
+spidercms_write_header_with_submenu_support();
 
 // ----------------------------------------------------------------------
 // Hasło + brute-force
@@ -1143,7 +1608,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $template = <<<'PHP'
 <?php
 require_once dirname(__DIR__, __ROOT_DEPTH__) . '/config.php';
-require_once dirname(__DIR__, __ROOT_DEPTH__) . '/header.php';
+$spidercms_root_dir = dirname(__DIR__, __ROOT_DEPTH__);
+$settings_file = $spidercms_root_dir . '/.settings.json';
+$settings = file_exists($settings_file) ? json_decode((string)file_get_contents($settings_file), true) : [];
+if (!is_array($settings)) { $settings = []; }
+if (!array_key_exists('header_enabled', $settings)) { $settings['header_enabled'] = '1'; }
+$logo_url = $settings['logo'] ?? ((defined('BASE_URL') ? BASE_URL : '') . 'assets/images/spidercms-icon.png');
+$menu_enabled = file_exists($spidercms_root_dir . '/.menu_enabled');
+$menu_items = json_decode(@file_get_contents($spidercms_root_dir . '/.menu.json') ?: '[]', true);
+if (!is_array($menu_items)) { $menu_items = []; }
+if ((string)($settings['header_enabled'] ?? '1') === '1') {
+    require_once $spidercms_root_dir . '/header.php';
+}
 $title = '__TITLE__';
 $content = <<<HTML
 __CONTENT__
@@ -1178,6 +1654,7 @@ HTML;
       --content-width: <?php echo preg_replace('/[^0-9.]/', '', $theme['content-width'] ?? '1240'); ?>px;
       --radius: <?php echo preg_replace('/[^0-9.]/', '', $theme['border-radius'] ?? '10'); ?>px;
       --header-shadow: <?php echo !empty($theme['shadow-enabled']) ? '0 2px 10px rgba(0,0,0,0.08)' : 'none'; ?>;
+      --menu-position: <?php echo $theme['menu-position'] ?? 'right'; ?>;
       --gray50: #f9fafb;
       --gray800: #1f2937;
     }
@@ -1194,10 +1671,10 @@ HTML;
     .cms-faq,.cms-contact{max-width:var(--content-width);margin:1.5rem auto;}
     .cms-faq details{padding:1rem;border:1px solid rgba(0,0,0,0.08);border-radius:var(--radius);margin:.7rem 0;background:#fff;}
     @media (max-width:768px){.cms-columns{grid-template-columns:1fr;}}
-    .site-header{position:fixed;top:0;left:0;right:0;background:var(--header-bg);box-shadow:var(--header-shadow);z-index:1000;text-align:left;}
+    .site-header{position:fixed;top:0;left:0;right:0;background:var(--header-bg,#ffffff)!important;background-color:var(--header-bg,#ffffff)!important;opacity:1!important;backdrop-filter:none!important;-webkit-backdrop-filter:none!important;box-shadow:var(--header-shadow);z-index:1000;text-align:left;}
     .header-container{max-width:var(--content-width);margin:0 auto;padding:0 1.5rem;display:flex;justify-content:space-between;align-items:center;height:var(--header-height);text-align:left;}
     .logo{font-weight:700;font-size:1.4rem;color:var(--primary);text-decoration:none;display:flex;align-items:center;justify-content:flex-start;text-align:left;margin-right:auto;}
-    .logo img{max-height:var(--logo-height);width:auto;display:block;margin:0;}
+    .logo{height:100%;}.logo img{max-height:min(var(--logo-height), calc(var(--header-height) - 14px));height:auto;width:auto;max-width:min(260px,40vw);object-fit:contain;display:block;margin:0;}
     .nav-menu{display:flex;gap:2rem;align-items:center;}
     .nav-menu a{color:var(--header-text);text-decoration:none;font-weight:500;padding:0.5rem 1rem;display:flex;align-items:center;gap:0.5rem;}
     .nav-menu a:hover{color:var(--primary);}
@@ -1290,6 +1767,49 @@ document.addEventListener('DOMContentLoaded', function(){
 });
 </script>
 
+<script>
+document.addEventListener('DOMContentLoaded', function(){
+    document.addEventListener('click', function(event){
+        const addBtn = event.target.closest('.add-submenu-btn');
+        if (addBtn) {
+            event.preventDefault();
+            const parent = addBtn.getAttribute('data-parent');
+            const list = document.getElementById('submenu-list-' + parent);
+            if (!list) return;
+
+            const row = document.createElement('div');
+            row.className = 'submenu-row';
+            row.innerHTML = '' +
+                '<div>' +
+                    '<label style="font-size:0.85rem; margin-bottom:0.25rem;">Podmenu – nazwa</label>' +
+                    '<input type="text" name="submenu_label[' + parent + '][]" placeholder="np. Projektowanie stron">' +
+                '</div>' +
+                '<div>' +
+                    '<label style="font-size:0.85rem; margin-bottom:0.25rem;">Podmenu – link</label>' +
+                    '<input type="text" name="submenu_url[' + parent + '][]" placeholder="/projektowanie-stron">' +
+                '</div>' +
+                '<div>' +
+                    '<label style="font-size:0.85rem; margin-bottom:0.25rem;">Podmenu – ikona</label>' +
+                    '<input type="text" name="submenu_icon[' + parent + '][]" placeholder="fa-solid fa-angle-right">' +
+                '</div>' +
+                '<button type="button" class="remove-submenu-btn"><i class="fa-solid fa-trash"></i></button>';
+
+            list.appendChild(row);
+            const firstInput = row.querySelector('input');
+            if (firstInput) firstInput.focus();
+            return;
+        }
+
+        const removeBtn = event.target.closest('.remove-submenu-btn');
+        if (removeBtn) {
+            event.preventDefault();
+            const row = removeBtn.closest('.submenu-row');
+            if (row) row.remove();
+        }
+    });
+});
+</script>
+
 </body>
 </html>
 PHP;
@@ -1364,16 +1884,57 @@ PHP;
         } else {
             @unlink(__DIR__ . '/.menu_enabled');
         }
+
         $items = [];
+        $submenu_labels = $_POST['submenu_label'] ?? [];
+        $submenu_urls   = $_POST['submenu_url'] ?? [];
+        $submenu_icons  = $_POST['submenu_icon'] ?? [];
+
         foreach (($_POST['menu_label'] ?? []) as $i => $label) {
-            $label = trim($label);
-            $url = trim($_POST['menu_url'][$i] ?? '');
-            $icon = trim($_POST['menu_icon'][$i] ?? '');
-            if ($label && $url) {
-                $items[] = ['label' => $label, 'url' => $url, 'icon' => $icon];
+            $label = trim((string)$label);
+            $url   = trim((string)($_POST['menu_url'][$i] ?? ''));
+            $icon  = trim((string)($_POST['menu_icon'][$i] ?? ''));
+
+            if ($label === '' && $url === '') {
+                continue;
             }
+
+            $children = [];
+            $child_labels = is_array($submenu_labels[$i] ?? null) ? $submenu_labels[$i] : [];
+            $child_urls   = is_array($submenu_urls[$i] ?? null) ? $submenu_urls[$i] : [];
+            $child_icons  = is_array($submenu_icons[$i] ?? null) ? $submenu_icons[$i] : [];
+
+            foreach ($child_labels as $j => $child_label) {
+                $child_label = trim((string)$child_label);
+                $child_url   = trim((string)($child_urls[$j] ?? ''));
+                $child_icon  = trim((string)($child_icons[$j] ?? ''));
+
+                if ($child_label === '' && $child_url === '') {
+                    continue;
+                }
+
+                $children[] = [
+                    'label' => $child_label,
+                    'url'   => $child_url,
+                    'icon'  => $child_icon,
+                ];
+            }
+
+            $item = [
+                'label' => $label,
+                'url'   => $url,
+                'icon'  => $icon,
+            ];
+
+            if (!empty($children)) {
+                $item['children'] = $children;
+            }
+
+            $items[] = $item;
         }
-        file_put_contents(__DIR__ . '/.menu.json', json_encode($items, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
+
+        file_put_contents(__DIR__ . '/.menu.json', json_encode($items, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES));
+        spidercms_write_header_with_submenu_support();
         $toast = ['type'=>'success', 'msg'=>'Konfiguracja menu zapisana'];
         header('Location: admin.php?tab=menu');
         exit;
@@ -1510,6 +2071,10 @@ PHP;
         $new_content_width = trim($_POST['content_width'] ?? '');
         $new_border_radius = trim($_POST['border_radius'] ?? '');
         $new_shadow_enabled = !empty($_POST['shadow_enabled']) ? '1' : '0';
+        $new_menu_position = $_POST['menu_position'] ?? theme_value('menu-position', 'right');
+        if (!in_array($new_menu_position, ['left','center','right'], true)) {
+            $new_menu_position = 'right';
+        }
         $logo_path = $logo_url;
         $logo_upload = $_FILES['logo'] ?? null;
         if ($logo_upload && $logo_upload['error'] === UPLOAD_ERR_OK) {
@@ -1520,7 +2085,7 @@ PHP;
                 $safe_name = 'logo-' . time() . '.' . $ext;
                 $target_file = $upload_dir . $safe_name;
                 if (move_uploaded_file($logo_upload['tmp_name'], $target_file)) {
-                    $logo_path = BASE_URL . 'uploads/' . $safe_name;
+                    $logo_path = ((defined('BASE_URL') && trim((string)BASE_URL) !== '') ? rtrim(BASE_URL, '/') : '') . '/uploads/' . $safe_name;
                 } else {
                     $toast = ['type' => 'error', 'msg' => 'Błąd przenoszenia pliku logo'];
                 }
@@ -1561,6 +2126,7 @@ PHP;
                 'content-width' => preg_replace('/[^0-9.]/', '', $new_content_width ?: theme_value('content-width', '1240')),
                 'border-radius' => preg_replace('/[^0-9.]/', '', $new_border_radius ?: theme_value('border-radius', '10')),
                 'shadow-enabled' => $new_shadow_enabled,
+                'menu-position' => $new_menu_position,
             ];
             file_put_contents(__DIR__ . '/.theme.json', json_encode($theme_data, JSON_PRETTY_PRINT));
             $requested_page_folder = spidercms_sanitize_page_folder($_POST['page_folder'] ?? ($GLOBALS['active_page_folder'] ?? 'pages'));
@@ -1568,7 +2134,10 @@ PHP;
             if (!is_dir($requested_page_dir)) { @mkdir($requested_page_dir, 0755, true); }
             file_put_contents($GLOBALS['page_folder_file'], json_encode(['folder' => $requested_page_folder], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
             $settings['logo'] = $logo_path;
-            file_put_contents($settings_file, json_encode($settings, JSON_PRETTY_PRINT));
+            $settings['header_enabled'] = !empty($_POST['header_enabled']) ? '1' : '0';
+            file_put_contents($settings_file, json_encode($settings, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
+            spidercms_write_header_with_submenu_support();
+            spidercms_sync_header_bootstrap_in_pages();
             $updated_pages = update_all_pages_colors();
             header('Location: admin.php?tab=ustawienia');
             exit;
@@ -1919,6 +2488,12 @@ function render_editor_tools() {
         .btn-full-export { background:#059669; color:white; padding:1rem 2rem; border-radius:8px; font-weight:700; font-size:1.1rem; display:inline-flex; align-items:center; gap:0.6rem; margin-top:1rem; border:none; cursor:pointer; box-shadow:0 4px 12px rgba(5,150,105,0.3); transition:all 0.2s; }
         .btn-full-export:hover { background:#047857; transform:translateY(-2px); box-shadow:0 6px 16px rgba(5,150,105,0.4); }
         .menu-row { display:grid; grid-template-columns:1fr 1fr 1fr; gap:1rem; margin-bottom:1rem; align-items:flex-end; }
+        .menu-main-block{background:#111827;border:1px solid #334155;border-radius:14px;padding:1rem;margin-bottom:1.2rem;}
+        .submenu-list{margin:.6rem 0 0 1.5rem;border-left:2px solid rgba(192,132,252,.35);padding-left:1rem;display:grid;gap:.65rem;}
+        .submenu-row{display:grid;grid-template-columns:1fr 1fr 1fr auto;gap:.75rem;align-items:flex-end;background:#0f172a;border:1px solid #334155;border-radius:12px;padding:.8rem;}
+        .add-submenu-btn{margin-top:.8rem;background:#334155!important;color:#f8fafc!important;padding:.65rem .9rem!important;font-size:.9rem!important;width:auto!important;}
+        .remove-submenu-btn{background:#ef4444!important;color:#fff!important;padding:.7rem .85rem!important;width:auto!important;}
+        @media(max-width:900px){.submenu-row{grid-template-columns:1fr}.menu-row{grid-template-columns:1fr}}
         .toast { position:fixed; top:1.2rem; right:1.2rem; padding:0.9rem 1.5rem; border-radius:8px; color:white; font-weight:500; z-index:1000; box-shadow:0 5px 18px rgba(0,0,0,0.3); }
         .toast.success { background:var(--success); }
         .toast.error { background:var(--danger); }
@@ -2413,9 +2988,11 @@ function render_editor_tools() {
                         <div><label for="font_family">Font CSS</label><input type="text" id="font_family" name="font_family" value="<?= htmlspecialchars(theme_value('font-family', 'system-ui, sans-serif')) ?>"></div>
                         <div><label for="header_height">Wysokość nagłówka [px]</label><input type="text" id="header_height" name="header_height" value="<?= htmlspecialchars(theme_value('header-height', '74')) ?>"></div>
                         <div><label for="logo_height">Maks. wysokość logo [px]</label><input type="text" id="logo_height" name="logo_height" value="<?= htmlspecialchars(theme_value('logo-height', '100')) ?>"></div>
+                        <div><label for="menu_position">Pozycja menu</label><select id="menu_position" name="menu_position"><option value="right" <?= theme_value('menu-position', 'right') === 'right' ? 'selected' : '' ?>>Po prawej</option><option value="center" <?= theme_value('menu-position', 'right') === 'center' ? 'selected' : '' ?>>Na środku</option><option value="left" <?= theme_value('menu-position', 'right') === 'left' ? 'selected' : '' ?>>Po lewej</option></select></div>
                         <div><label for="content_width">Szerokość treści [px]</label><input type="text" id="content_width" name="content_width" value="<?= htmlspecialchars(theme_value('content-width', '1240')) ?>"></div>
                         <div><label for="border_radius">Zaokrąglenia [px]</label><input type="text" id="border_radius" name="border_radius" value="<?= htmlspecialchars(theme_value('border-radius', '10')) ?>"></div>
                         <div><label style="display:flex;align-items:center;gap:0.8rem;margin-top:2.1rem;"><input type="checkbox" name="shadow_enabled" <?= theme_value('shadow-enabled', '1') === '1' ? 'checked' : '' ?> style="width:auto;transform:scale(1.2);"> Cień nagłówka</label></div>
+                        <div><label style="display:flex;align-items:center;gap:0.8rem;margin-top:2.1rem;"><input type="checkbox" name="header_enabled" value="1" <?= (($settings['header_enabled'] ?? '1') === '1') ? 'checked' : '' ?> style="width:auto;transform:scale(1.2);"> Pokaż systemowy nagłówek</label><p style="color:#94a3b8;font-size:0.9rem;margin-top:0.5rem;">Po odznaczeniu nie będzie ładowany obecny header.php, czyli zniknie cały domyślny nagłówek z logo i menu. Gdy opcja jest włączona, nagłówek zostaje dokładnie w poprzednim stylu.</p></div>
                     </div>
                     <div class="settings-actions-bottom"><button type="submit"><i class="fa-solid fa-floppy-disk"></i> Zapisz układ</button></div>
                 </section>
@@ -2536,20 +3113,49 @@ function render_editor_tools() {
                     <strong>Włącz górne menu na wszystkich stronach</strong>
                 </label>
                 <div id="menu-items">
-                    <?php for ($i = 0; $i < 8; $i++): $item = $menu_items[$i] ?? ['label' => '', 'url' => '', 'icon' => '']; ?>
-                    <div class="menu-row">
-                        <div>
-                            <label style="font-size:0.9rem; margin-bottom:0.3rem;">Nazwa / tekst</label>
-                            <input type="text" name="menu_label[]" value="<?= htmlspecialchars($item['label'] ?? '') ?>" placeholder="np. O nas">
+                    <?php for ($i = 0; $i < 8; $i++):
+                        $item = $menu_items[$i] ?? ['label' => '', 'url' => '', 'icon' => '', 'children' => []];
+                        $children = is_array($item['children'] ?? null) ? $item['children'] : [];
+                    ?>
+                    <div class="menu-main-block" data-menu-index="<?= (int)$i ?>">
+                        <div class="menu-row">
+                            <div>
+                                <label style="font-size:0.9rem; margin-bottom:0.3rem;">Nazwa / tekst</label>
+                                <input type="text" name="menu_label[]" value="<?= htmlspecialchars($item['label'] ?? '') ?>" placeholder="np. O nas">
+                            </div>
+                            <div>
+                                <label style="font-size:0.9rem; margin-bottom:0.3rem;">Link (URL)</label>
+                                <input type="text" name="menu_url[]" value="<?= htmlspecialchars($item['url'] ?? '') ?>" placeholder="/o-nas">
+                            </div>
+                            <div>
+                                <label style="font-size:0.9rem; margin-bottom:0.3rem;">Ikona (Font Awesome / URL)</label>
+                                <input type="text" name="menu_icon[]" value="<?= htmlspecialchars($item['icon'] ?? '') ?>" placeholder="fa-solid fa-home">
+                            </div>
                         </div>
-                        <div>
-                            <label style="font-size:0.9rem; margin-bottom:0.3rem;">Link (URL)</label>
-                            <input type="text" name="menu_url[]" value="<?= htmlspecialchars($item['url'] ?? '') ?>" placeholder="/o-nas">
+
+                        <div class="submenu-list" id="submenu-list-<?= (int)$i ?>">
+                            <?php foreach ($children as $child): ?>
+                            <div class="submenu-row">
+                                <div>
+                                    <label style="font-size:0.85rem; margin-bottom:0.25rem;">Podmenu – nazwa</label>
+                                    <input type="text" name="submenu_label[<?= (int)$i ?>][]" value="<?= htmlspecialchars($child['label'] ?? '') ?>" placeholder="np. Projektowanie stron">
+                                </div>
+                                <div>
+                                    <label style="font-size:0.85rem; margin-bottom:0.25rem;">Podmenu – link</label>
+                                    <input type="text" name="submenu_url[<?= (int)$i ?>][]" value="<?= htmlspecialchars($child['url'] ?? '') ?>" placeholder="/projektowanie-stron">
+                                </div>
+                                <div>
+                                    <label style="font-size:0.85rem; margin-bottom:0.25rem;">Podmenu – ikona</label>
+                                    <input type="text" name="submenu_icon[<?= (int)$i ?>][]" value="<?= htmlspecialchars($child['icon'] ?? '') ?>" placeholder="fa-solid fa-angle-right">
+                                </div>
+                                <button type="button" class="remove-submenu-btn" onclick="this.closest('.submenu-row').remove();"><i class="fa-solid fa-trash"></i></button>
+                            </div>
+                            <?php endforeach; ?>
                         </div>
-                        <div>
-                            <label style="font-size:0.9rem; margin-bottom:0.3rem;">Ikona (Font Awesome / URL)</label>
-                            <input type="text" name="menu_icon[]" value="<?= htmlspecialchars($item['icon'] ?? '') ?>" placeholder="fa-solid fa-home">
-                        </div>
+
+                        <button type="button" class="add-submenu-btn" data-parent="<?= (int)$i ?>">
+                            <i class="fa-solid fa-plus"></i> Dodaj podmenu
+                        </button>
                     </div>
                     <?php endfor; ?>
                 </div>
@@ -2557,14 +3163,121 @@ function render_editor_tools() {
             </form>
         </div>
     <?php elseif ($tab === 'o-cms'): ?>
+        <?php
+            $cms_version = '1.4 Social & Chat Edition';
+            $php_version = PHP_VERSION;
+            $server_software = $_SERVER['SERVER_SOFTWARE'] ?? 'Nieznany';
+            $security_checks = [
+                ['label' => 'Plik hasła administratora', 'ok' => file_exists(__DIR__ . '/.admin_hash'), 'hint' => '.admin_hash istnieje'],
+                ['label' => 'Katalog uploadów', 'ok' => is_dir(__DIR__ . '/uploads'), 'hint' => 'uploads/ gotowy'],
+                ['label' => 'Blokada PHP w uploads', 'ok' => file_exists(__DIR__ . '/uploads/.htaccess'), 'hint' => 'warto blokować wykonywanie PHP'],
+                ['label' => 'Katalog chatu', 'ok' => is_dir(__DIR__ . '/.chat'), 'hint' => '.chat/ gotowy'],
+                ['label' => 'Ochrona katalogu chatu', 'ok' => file_exists(__DIR__ . '/.chat/.htaccess'), 'hint' => 'warto zablokować publiczny dostęp'],
+                ['label' => 'Konfiguracja motywu', 'ok' => file_exists(__DIR__ . '/.theme.json'), 'hint' => '.theme.json zapisany'],
+                ['label' => 'Konfiguracja social media', 'ok' => file_exists(__DIR__ . '/.social.json'), 'hint' => '.social.json zapisany'],
+            ];
+            $enabled_modules = [
+                ['icon' => 'fa-file-lines', 'name' => 'Strony flat-file', 'desc' => 'Tworzenie i edycja podstron bez bazy danych.'],
+                ['icon' => 'fa-bars', 'name' => 'Menu', 'desc' => 'Globalne menu z ikonami i linkami.'],
+                ['icon' => 'fa-shoe-prints', 'name' => 'Stopka wielokolumnowa', 'desc' => 'Dowolna liczba kolumn stopki.'],
+                ['icon' => 'fa-comments', 'name' => 'Chat', 'desc' => 'Komunikacja użytkownika strony z administratorem.'],
+                ['icon' => 'fa-box-archive', 'name' => 'Archiwum chatu', 'desc' => 'Historia rozmów zapisywana lokalnie.'],
+                ['icon' => 'fa-images', 'name' => 'Media', 'desc' => 'Upload i zarządzanie plikami.'],
+                ['icon' => 'fa-share-nodes', 'name' => 'Social Hub', 'desc' => 'Ikony social media, floating bar i OpenGraph.'],
+                ['icon' => 'fa-palette', 'name' => 'Motyw', 'desc' => 'Kolory, logo, układ i globalne style.'],
+            ];
+        ?>
         <div class="card card-about">
-            <h2 style="margin-top:0; color:var(--about-color);"><i class="fa-solid fa-info-circle" style="margin-right:0.6rem;"></i> O tym CMS-ie</h2>
-            <p style="margin:1.5rem 0; line-height:1.7;">
-                <strong>SpiderCMS</strong> to ultra-lekki, plikowy system zarządzania treścią (Flat-File) stworzony z myślą o wydajności i prostocie.
-            </p>
-            <div style="margin-top:2.5rem; text-align:center; border-top:1px solid var(--gray-200); padding-top:1.5rem;">
-                <p style="color:#94a3b8;">Wersja: 1.1 Cyber-Update | Autor: [Kamil Paprota]</p>
-                <p style="color:#6b7280;">© <?= date('Y') ?> SpiderCMS – wszystkie prawa zastrzeżone</p>
+            <div style="display:flex; align-items:flex-start; justify-content:space-between; gap:1.5rem; flex-wrap:wrap;">
+                <div>
+                    <h2 style="margin-top:0; color:var(--about-color);"><i class="fa-solid fa-info-circle" style="margin-right:0.6rem;"></i> O SpiderCMS</h2>
+                    <p style="margin:1rem 0 0; line-height:1.7; max-width:850px; color:#cbd5e1;">
+                        <strong>SpiderCMS</strong> to lekki, plikowy system zarządzania treścią dla osób tworzących małe strony firmowe, landing page, portfolio i proste serwisy bez bazy danych. Panel łączy edycję treści, wygląd, media, social media, stopkę, menu oraz chat z administratorem.
+                    </p>
+                </div>
+                <div style="background:#0f172a; border:1px solid var(--gray-200); border-radius:12px; padding:1rem 1.2rem; min-width:230px;">
+                    <div style="color:#94a3b8; font-size:0.9rem;">Wersja systemu</div>
+                    <div style="font-size:1.25rem; font-weight:800; color:var(--primary); margin-top:0.25rem;"><?= htmlspecialchars($cms_version) ?></div>
+                </div>
+            </div>
+
+            <div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(210px,1fr)); gap:1rem; margin-top:1.8rem;">
+                <div style="background:#0f172a; border:1px solid var(--gray-200); border-radius:12px; padding:1.1rem;">
+                    <div style="color:#94a3b8;"><i class="fa-solid fa-file"></i> Strony</div>
+                    <div style="font-size:2rem; font-weight:800; color:var(--accent);"><?= count($pages) ?></div>
+                </div>
+                <div style="background:#0f172a; border:1px solid var(--gray-200); border-radius:12px; padding:1.1rem;">
+                    <div style="color:#94a3b8;"><i class="fa-solid fa-image"></i> Media</div>
+                    <div style="font-size:2rem; font-weight:800; color:#34d399;"><?= count($media_files) ?></div>
+                </div>
+            </div>
+
+            <div style="display:grid; grid-template-columns:1.15fr 0.85fr; gap:1.4rem; margin-top:1.8rem;">
+                <div style="background:#0f172a; border:1px solid var(--gray-200); border-radius:12px; padding:1.2rem;">
+                    <h3 style="margin:0 0 1rem; color:var(--primary);"><i class="fa-solid fa-puzzle-piece"></i> Aktywne moduły</h3>
+                    <div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(230px,1fr)); gap:0.8rem;">
+                        <?php foreach ($enabled_modules as $module): ?>
+                            <div style="border:1px solid var(--gray-200); border-radius:10px; padding:0.9rem; background:#111827;">
+                                <div style="font-weight:800; color:#f8fafc;"><i class="fa-solid <?= htmlspecialchars($module['icon']) ?>" style="color:var(--about-color); margin-right:0.45rem;"></i><?= htmlspecialchars($module['name']) ?></div>
+                                <div style="color:#94a3b8; font-size:0.92rem; margin-top:0.35rem; line-height:1.45;"><?= htmlspecialchars($module['desc']) ?></div>
+                            </div>
+                        <?php endforeach; ?>
+                    </div>
+                </div>
+
+                <div style="background:#0f172a; border:1px solid var(--gray-200); border-radius:12px; padding:1.2rem;">
+                    <h3 style="margin:0 0 1rem; color:#fbbf24;"><i class="fa-solid fa-shield-halved"></i> Checklista bezpieczeństwa</h3>
+                    <div style="display:flex; flex-direction:column; gap:0.65rem;">
+                        <?php foreach ($security_checks as $check): ?>
+                            <div style="display:flex; align-items:flex-start; gap:0.65rem; padding:0.7rem; border-radius:9px; background:#111827; border:1px solid var(--gray-200);">
+                                <i class="fa-solid <?= $check['ok'] ? 'fa-circle-check' : 'fa-triangle-exclamation' ?>" style="color:<?= $check['ok'] ? '#10b981' : '#f59e0b' ?>; margin-top:0.15rem;"></i>
+                                <div>
+                                    <div style="font-weight:700;"><?= htmlspecialchars($check['label']) ?></div>
+                                    <div style="color:#94a3b8; font-size:0.88rem;"><?= htmlspecialchars($check['hint']) ?></div>
+                                </div>
+                            </div>
+                        <?php endforeach; ?>
+                    </div>
+                </div>
+            </div>
+
+            <div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(280px,1fr)); gap:1.4rem; margin-top:1.8rem;">
+                <div style="background:#0f172a; border:1px solid var(--gray-200); border-radius:12px; padding:1.2rem;">
+                    <h3 style="margin:0 0 1rem; color:#60a5fa;"><i class="fa-solid fa-server"></i> Informacje techniczne</h3>
+                    <table style="margin:0;">
+                        <tr><th>PHP</th><td><?= htmlspecialchars($php_version) ?></td></tr>
+                        <tr><th>Serwer</th><td><?= htmlspecialchars($server_software) ?></td></tr>
+                        <tr><th>Folder stron</th><td><code><?= htmlspecialchars(defined('PAGES_DIR') ? PAGES_DIR : 'brak') ?></code></td></tr>
+                        <tr><th>URL stron</th><td><code><?= htmlspecialchars(defined('ACTIVE_PAGES_URL') ? ACTIVE_PAGES_URL : (defined('PAGES_URL') ? PAGES_URL : 'brak')) ?></code></td></tr>
+                        <tr><th>Strona główna</th><td><code><?= htmlspecialchars($homepage_slug) ?>.php</code></td></tr>
+                    </table>
+                </div>
+
+                <div style="background:#0f172a; border:1px solid var(--gray-200); border-radius:12px; padding:1.2rem;">
+                    <h3 style="margin:0 0 1rem; color:#34d399;"><i class="fa-solid fa-route"></i> Przydatne skróty</h3>
+                    <div style="display:flex; flex-direction:column; gap:0.75rem;">
+                        <a class="btn btn-view" href="/" target="_blank"><i class="fa-solid fa-arrow-up-right-from-square"></i> Otwórz stronę publiczną</a>
+                        <a class="btn btn-edit" href="admin.php?tab=strony"><i class="fa-solid fa-file-circle-plus"></i> Zarządzaj stronami</a>
+                        <a class="btn btn-export" href="admin.php?tab=ustawienia"><i class="fa-solid fa-gear"></i> Ustawienia systemu</a>
+                        <a class="btn btn-view" href="admin.php?tab=media"><i class="fa-solid fa-images"></i> Biblioteka mediów</a>
+                    </div>
+                </div>
+            </div>
+
+            <div style="margin-top:1.8rem; background:#0f172a; border:1px solid var(--gray-200); border-radius:12px; padding:1.2rem;">
+                <h3 style="margin:0 0 1rem; color:var(--about-color);"><i class="fa-solid fa-list-check"></i> Szybka instrukcja pracy</h3>
+                <ol style="padding-left:1.2rem; color:#cbd5e1; line-height:1.8;">
+                    <li>Utwórz nową stronę w zakładce <strong>Strony</strong> i wybierz folder zapisu.</li>
+                    <li>Wstaw gotowe sekcje z narzędzi edytora, a następnie dopasuj treść w TinyMCE.</li>
+                    <li>Dodaj logo, kolory i style w <strong>Ustawieniach</strong>.</li>
+                    <li>Ustaw menu, stopkę wielokolumnową i linki social media.</li>
+                    <li>Przed publikacją sprawdź checklistę bezpieczeństwa oraz wykonaj eksport ZIP.</li>
+                </ol>
+            </div>
+
+            <div style="margin-top:2rem; text-align:center; border-top:1px solid var(--gray-200); padding-top:1.5rem;">
+                <p style="color:#94a3b8;">Wersja: <?= htmlspecialchars($cms_version) ?> | Autor: Kamil Paprota</p>
+                <p style="color:#6b7280;">© <?= date('Y') ?> SpiderCMS – panel administracyjny</p>
             </div>
         </div>
     <?php else: ?>
@@ -2777,6 +3490,49 @@ document.addEventListener('DOMContentLoaded', function(){
 
     bindRemoveButtons();
     refreshFooterColumnLabels();
+});
+</script>
+
+<script>
+document.addEventListener('DOMContentLoaded', function(){
+    document.addEventListener('click', function(event){
+        const addBtn = event.target.closest('.add-submenu-btn');
+        if (addBtn) {
+            event.preventDefault();
+            const parent = addBtn.getAttribute('data-parent');
+            const list = document.getElementById('submenu-list-' + parent);
+            if (!list) return;
+
+            const row = document.createElement('div');
+            row.className = 'submenu-row';
+            row.innerHTML = '' +
+                '<div>' +
+                    '<label style="font-size:0.85rem; margin-bottom:0.25rem;">Podmenu – nazwa</label>' +
+                    '<input type="text" name="submenu_label[' + parent + '][]" placeholder="np. Projektowanie stron">' +
+                '</div>' +
+                '<div>' +
+                    '<label style="font-size:0.85rem; margin-bottom:0.25rem;">Podmenu – link</label>' +
+                    '<input type="text" name="submenu_url[' + parent + '][]" placeholder="/projektowanie-stron">' +
+                '</div>' +
+                '<div>' +
+                    '<label style="font-size:0.85rem; margin-bottom:0.25rem;">Podmenu – ikona</label>' +
+                    '<input type="text" name="submenu_icon[' + parent + '][]" placeholder="fa-solid fa-angle-right">' +
+                '</div>' +
+                '<button type="button" class="remove-submenu-btn"><i class="fa-solid fa-trash"></i></button>';
+
+            list.appendChild(row);
+            const firstInput = row.querySelector('input');
+            if (firstInput) firstInput.focus();
+            return;
+        }
+
+        const removeBtn = event.target.closest('.remove-submenu-btn');
+        if (removeBtn) {
+            event.preventDefault();
+            const row = removeBtn.closest('.submenu-row');
+            if (row) row.remove();
+        }
+    });
 });
 </script>
 

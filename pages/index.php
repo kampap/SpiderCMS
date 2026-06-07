@@ -1,7 +1,17 @@
 <?php
-require_once __DIR__ . '/../config.php';
-require_once __DIR__ . '/../header.php';
-
+require_once dirname(__DIR__, 1) . '/config.php';
+$spidercms_root_dir = dirname(__DIR__, 1);
+$settings_file = $spidercms_root_dir . '/.settings.json';
+$settings = file_exists($settings_file) ? json_decode((string)file_get_contents($settings_file), true) : [];
+if (!is_array($settings)) { $settings = []; }
+if (!array_key_exists('header_enabled', $settings)) { $settings['header_enabled'] = '1'; }
+$logo_url = $settings['logo'] ?? ((defined('BASE_URL') ? BASE_URL : '') . 'assets/images/spidercms-icon.png');
+$menu_enabled = file_exists($spidercms_root_dir . '/.menu_enabled');
+$menu_items = json_decode(@file_get_contents($spidercms_root_dir . '/.menu.json') ?: '[]', true);
+if (!is_array($menu_items)) { $menu_items = []; }
+if ((string)($settings['header_enabled'] ?? '1') === '1') {
+    require_once $spidercms_root_dir . '/header.php';
+}
 $title = 'Strona Główna';
 $content = <<<HTML
 <!-- HERO -->
@@ -140,6 +150,8 @@ HTML;
  --content-width: 1240px;
  --radius: 10px;
  --header-shadow: 0 2px 10px rgba(0,0,0,0.08);
+ --menu-position: center;
+ --spidercms-logo-max-height: min(var(--logo-height,100px), calc(var(--header-height,74px) - 14px));
  --gray50: #f9fafb;
  --gray800: #1f2937;
 }
@@ -162,10 +174,147 @@ HTML;
     main{margin-top:90px;padding:2rem 1rem;}
   </style>
 <?php require_once dirname(__DIR__, 1) . '/social-meta.php'; ?>
+<style id="spidercms-header-opaque-fix">
+/*
+   SpiderCMS: ujednolicenie wyglądu nagłówka na stronie głównej.
+   Ta poprawka NIE przenosi header.php i NIE zmienia struktury strony.
+   Nadpisuje tylko style, które na stronie głównej mogły robić nagłówek
+   półprzezroczysty albo inny niż na pozostałych podstronach.
+*/
+:root{
+    --spidercms-header-solid-bg: var(--header-bg,#ffffff);
+    --spidercms-header-solid-text: var(--header-text,#374151);
+}
+body .site-header{
+    position:fixed!important;
+    top:0!important;
+    left:0!important;
+    right:0!important;
+    z-index:1000!important;
+    background:var(--spidercms-header-solid-bg)!important;
+    background-color:var(--spidercms-header-solid-bg)!important;
+    opacity:1!important;
+    filter:none!important;
+    backdrop-filter:none!important;
+    -webkit-backdrop-filter:none!important;
+    box-shadow:var(--header-shadow,0 2px 10px rgba(0,0,0,.08))!important;
+    text-align:left!important;
+}
+body .site-header::before,
+body .site-header::after{
+    display:none!important;
+    content:none!important;
+    opacity:1!important;
+    filter:none!important;
+    backdrop-filter:none!important;
+    -webkit-backdrop-filter:none!important;
+}
+body .site-header .header-container{
+    max-width:var(--content-width,1240px)!important;
+    margin:0 auto!important;
+    padding:0 1.5rem!important;
+    display:flex!important;
+    justify-content:space-between!important;
+    align-items:center!important;
+    height:var(--header-height,74px)!important;
+    min-height:var(--header-height,74px)!important;
+    background:transparent!important;
+    text-align:left!important;
+}
+body .site-header.menu-left .header-container,
+body .site-header.menu-center .header-container,
+body .site-header.menu-right .header-container{
+    justify-content:flex-start!important;
+}
+body .site-header .logo{
+    font-weight:700!important;
+    font-size:1.4rem!important;
+    color:var(--primary,#a855f7)!important;
+    text-decoration:none!important;
+    display:flex!important;
+    align-items:center!important;
+    justify-content:flex-start!important;
+    text-align:left!important;
+    margin-right:auto!important;
+    height:100%!important;
+}
+body .site-header.menu-left .logo,
+body .site-header.menu-center .logo{
+    margin-right:1.5rem!important;
+}
+body .site-header.menu-right .logo{
+    margin-right:auto!important;
+}
+body .site-header .logo img{
+    max-height:min(var(--logo-height,100px), calc(var(--header-height,74px) - 14px))!important;
+    height:auto!important;
+    width:auto!important;
+    max-width:min(260px, 40vw)!important;
+    object-fit:contain!important;
+    display:block!important;
+    margin:0!important;
+    opacity:1!important;
+    filter:none!important;
+}
+body .site-header .nav-menu{
+    display:flex!important;
+    gap:2rem!important;
+    align-items:center!important;
+    background:transparent!important;
+}
+body .site-header.menu-left .nav-menu{
+    margin-left:0!important;
+    margin-right:auto!important;
+}
+body .site-header.menu-center .nav-menu{
+    margin-left:auto!important;
+    margin-right:auto!important;
+}
+body .site-header.menu-right .nav-menu{
+    margin-left:auto!important;
+    margin-right:0!important;
+}
+body .site-header .nav-menu a{
+    color:var(--spidercms-header-solid-text)!important;
+    text-decoration:none!important;
+    font-weight:500!important;
+    padding:.5rem 1rem!important;
+    display:flex!important;
+    align-items:center!important;
+    gap:.5rem!important;
+    background:transparent!important;
+}
+body .site-header .nav-menu a:hover{
+    color:var(--primary,#a855f7)!important;
+}
+body .site-header .menu-toggle{
+    color:var(--spidercms-header-solid-text)!important;
+}
+@media (max-width:768px){
+    body .site-header .nav-menu{
+        display:none!important;
+        position:absolute!important;
+        top:var(--header-height,74px)!important;
+        left:0!important;
+        right:0!important;
+        flex-direction:column!important;
+        padding:1.5rem!important;
+        background:var(--spidercms-header-solid-bg)!important;
+        box-shadow:0 6px 16px rgba(0,0,0,.1)!important;
+    }
+    body .site-header .nav-menu.active{
+        display:flex!important;
+    }
+    body .site-header .menu-toggle{
+        display:block!important;
+    }
+}
+</style>
 </head>
 <body>
-
 <?php // Nagłówek wczytany z header.php ?>
+
+
 
 <main><?php echo $content; ?></main>
 
