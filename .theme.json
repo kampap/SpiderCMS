@@ -1,0 +1,21 @@
+{
+    "primary": "#a855f7",
+    "primary-dark": "#7e22ce",
+    "accent": "#2563eb",
+    "page-bg": "#f9fafb",
+    "page-text": "#111827",
+    "header-bg": "#ffffff",
+    "header-text": "#374151",
+    "footer-bg": "#1f2937",
+    "footer-text": "#f3f4f6",
+    "footer-muted": "#9ca3af",
+    "link-color": "#a855f7",
+    "button-bg": "#a855f7",
+    "button-text": "#ffffff",
+    "font-family": "system-ui, sans-serif",
+    "header-height": "74",
+    "logo-height": "100",
+    "content-width": "1240",
+    "border-radius": "10",
+    "shadow-enabled": "1"
+}

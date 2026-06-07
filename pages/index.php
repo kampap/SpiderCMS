@@ -161,6 +161,7 @@ HTML;
     }
     main{margin-top:90px;padding:2rem 1rem;}
   </style>
+<?php require_once dirname(__DIR__, 1) . '/social-meta.php'; ?>
 </head>
 <body>
 
@@ -172,5 +173,7 @@ HTML;
   © <?= date('Y') ?> <?= SITE_NAME ?>
 </footer>
 
+<?php require_once __DIR__ . '/../chat-widget.php'; ?>
+<?php require_once dirname(__DIR__, 1) . '/social-widget.php'; ?>
 </body>
 </html>
