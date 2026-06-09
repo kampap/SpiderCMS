@@ -63,10 +63,423 @@ function spidercms_write_htaccess($dir, $content) {
     }
 }
 
+
+// ----------------------------------------------------------------------
+// SYSTEM LOGÓW – rejestrowanie akcji administratora
+// ----------------------------------------------------------------------
+define('SPIDERCMS_LOG_DIR', __DIR__ . '/.logs');
+define('SPIDERCMS_ACTION_LOG_FILE', SPIDERCMS_LOG_DIR . '/admin-actions.jsonl');
+
+function spidercms_logs_bootstrap() {
+    if (!is_dir(SPIDERCMS_LOG_DIR)) {
+        @mkdir(SPIDERCMS_LOG_DIR, 0755, true);
+    }
+    spidercms_write_htaccess(SPIDERCMS_LOG_DIR, "Require all denied\nDeny from all\nOptions -Indexes\n");
+}
+
+function spidercms_log_sanitize_context(array $context) {
+    $blocked = ['password','new_password','repeat_password','smtp_password','csrf_token','content','page_content','message','body'];
+    $safe = [];
+    foreach ($context as $key => $value) {
+        $key_l = strtolower((string)$key);
+        if (in_array($key_l, $blocked, true) || str_contains($key_l, 'password') || str_contains($key_l, 'token')) continue;
+        if (is_array($value)) {
+            $safe[$key] = '[array:' . count($value) . ']';
+        } else {
+            $value = trim((string)$value);
+            $safe[$key] = function_exists('mb_substr') ? mb_substr($value, 0, 180, 'UTF-8') : substr($value, 0, 180);
+        }
+    }
+    return $safe;
+}
+
+function spidercms_log_label($action) {
+    $labels = [
+        'login_success'=>'Logowanie poprawne','login_failed'=>'Nieudane logowanie','logout'=>'Wylogowanie',
+        'save_stats_settings'=>'Zapis ustawień statystyk','reset_stats'=>'Wyczyszczenie statystyk',
+        'save_slider'=>'Zapis slidera','delete_slider'=>'Usunięcie slidera','create'=>'Utworzenie strony',
+        'edit'=>'Edycja strony','delete'=>'Usunięcie strony','duplicate'=>'Duplikowanie strony',
+        'set_homepage'=>'Zmiana strony głównej','save_menu'=>'Zapis menu','save_footer'=>'Zapis stopki',
+        'apply_site_preset'=>'Zastosowanie presetu wyglądu','save_settings'=>'Zapis ustawień witryny',
+        'change_password'=>'Zmiana hasła administratora','save_social_settings'=>'Zapis social media',
+        'export_all'=>'Eksport ZIP','upload_media'=>'Upload pliku','delete_media'=>'Usunięcie pliku',
+        'save_chat_settings'=>'Zapis ustawień czatu','test_chat_email'=>'Test e-mail / SMTP',
+        'chat_reply'=>'Odpowiedź na czacie','chat_mark_read'=>'Oznaczenie rozmowy jako przeczytanej',
+        'chat_archive'=>'Archiwizacja rozmowy','chat_delete'=>'Usunięcie rozmowy','clear_action_logs'=>'Czyszczenie logów',
+        'export_action_logs'=>'Eksport logów akcji'
+    ];
+    return $labels[$action] ?? $action;
+}
+
+function spidercms_log_action($action, $status = 'info', array $context = []) {
+    spidercms_logs_bootstrap();
+    $entry = [
+        'time'=>date('Y-m-d H:i:s'), 'timestamp'=>time(), 'action'=>(string)$action,
+        'label'=>spidercms_log_label((string)$action), 'status'=>(string)$status,
+        'ip'=>spidercms_client_ip(), 'user_agent'=>$_SERVER['HTTP_USER_AGENT'] ?? '',
+        'url'=>$_SERVER['REQUEST_URI'] ?? '', 'method'=>$_SERVER['REQUEST_METHOD'] ?? '',
+        'context'=>spidercms_log_sanitize_context($context)
+    ];
+    @file_put_contents(SPIDERCMS_ACTION_LOG_FILE, json_encode($entry, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) . "\n", FILE_APPEND | LOCK_EX);
+}
+
+function spidercms_read_action_logs($limit = 300, $filter_action = '', $filter_status = '') {
+    spidercms_logs_bootstrap();
+    if (!file_exists(SPIDERCMS_ACTION_LOG_FILE)) return [];
+    $lines = @file(SPIDERCMS_ACTION_LOG_FILE, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+    if (!is_array($lines)) return [];
+    $lines = array_reverse($lines);
+    $out = [];
+    foreach ($lines as $line) {
+        $row = json_decode($line, true);
+        if (!is_array($row)) continue;
+        if ($filter_action !== '' && ($row['action'] ?? '') !== $filter_action) continue;
+        if ($filter_status !== '' && ($row['status'] ?? '') !== $filter_status) continue;
+        $out[] = $row;
+        if (count($out) >= $limit) break;
+    }
+    return $out;
+}
+
+
+function spidercms_read_action_logs_for_export($filter_action = '', $filter_status = '', $date_from = '', $date_to = '') {
+    spidercms_logs_bootstrap();
+    if (!file_exists(SPIDERCMS_ACTION_LOG_FILE)) return [];
+    $lines = @file(SPIDERCMS_ACTION_LOG_FILE, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+    if (!is_array($lines)) return [];
+    $out = [];
+    $from_ts = $date_from !== '' ? strtotime($date_from . ' 00:00:00') : 0;
+    $to_ts = $date_to !== '' ? strtotime($date_to . ' 23:59:59') : 0;
+    foreach ($lines as $line) {
+        $row = json_decode($line, true);
+        if (!is_array($row)) continue;
+        $ts = (int)($row['timestamp'] ?? strtotime($row['time'] ?? 'now'));
+        if ($filter_action !== '' && ($row['action'] ?? '') !== $filter_action) continue;
+        if ($filter_status !== '' && ($row['status'] ?? '') !== $filter_status) continue;
+        if ($from_ts > 0 && $ts < $from_ts) continue;
+        if ($to_ts > 0 && $ts > $to_ts) continue;
+        $out[] = $row;
+    }
+    return array_reverse($out);
+}
+
+function spidercms_log_export_filename($ext) {
+    return 'spidercms-logi-' . date('Y-m-d-His') . '.' . preg_replace('/[^a-z0-9]/i', '', $ext);
+}
+
+function spidercms_send_download_headers($filename, $content_type) {
+    if (ob_get_level()) {
+        while (ob_get_level()) { @ob_end_clean(); }
+    }
+    header('Content-Type: ' . $content_type);
+    header('Content-Disposition: attachment; filename="' . basename($filename) . '"');
+    header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
+    header('Pragma: no-cache');
+}
+
+function spidercms_export_logs($format, array $logs) {
+    $format = strtolower((string)$format);
+    if (!in_array($format, ['csv','json','txt','zip'], true)) $format = 'csv';
+
+    if ($format === 'json') {
+        $filename = spidercms_log_export_filename('json');
+        spidercms_send_download_headers($filename, 'application/json; charset=utf-8');
+        echo json_encode($logs, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+        exit;
+    }
+
+    if ($format === 'txt') {
+        $filename = spidercms_log_export_filename('txt');
+        spidercms_send_download_headers($filename, 'text/plain; charset=utf-8');
+        echo "SpiderCMS - eksport logów\n";
+        echo "Data eksportu: " . date('Y-m-d H:i:s') . "\n";
+        echo "Liczba rekordów: " . count($logs) . "\n";
+        echo str_repeat('=', 80) . "\n\n";
+        foreach ($logs as $log) {
+            echo "Czas: " . ($log['time'] ?? '') . "\n";
+            echo "Status: " . ($log['status'] ?? '') . "\n";
+            echo "Akcja: " . ($log['label'] ?? spidercms_log_label($log['action'] ?? '')) . " [" . ($log['action'] ?? '') . "]\n";
+            echo "IP: " . ($log['ip'] ?? '') . "\n";
+            echo "URL: " . ($log['url'] ?? '') . "\n";
+            echo "Metoda: " . ($log['method'] ?? '') . "\n";
+            echo "Szczegóły: " . json_encode($log['context'] ?? [], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) . "\n";
+            echo str_repeat('-', 80) . "\n";
+        }
+        exit;
+    }
+
+    if ($format === 'zip') {
+        if (!class_exists('ZipArchive')) {
+            // Awaryjnie, jeśli hosting nie ma rozszerzenia zip.
+            $filename = spidercms_log_export_filename('json');
+            spidercms_send_download_headers($filename, 'application/json; charset=utf-8');
+            echo json_encode(['warning'=>'Brak rozszerzenia ZipArchive na serwerze. Zwrócono JSON zamiast ZIP.','logs'=>$logs], JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+            exit;
+        }
+        $tmp = tempnam(sys_get_temp_dir(), 'spidercms_logs_');
+        $zip = new ZipArchive();
+        if ($zip->open($tmp, ZipArchive::OVERWRITE) === true) {
+            $zip->addFromString('admin-actions.json', json_encode($logs, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES));
+            $csv = fopen('php://temp', 'r+');
+            fwrite($csv, "\xEF\xBB\xBF");
+            fputcsv($csv, ['czas','status','akcja','etykieta','ip','url','metoda','user_agent','szczegoly'], ';');
+            foreach ($logs as $log) {
+                fputcsv($csv, [
+                    $log['time'] ?? '', $log['status'] ?? '', $log['action'] ?? '', $log['label'] ?? '',
+                    $log['ip'] ?? '', $log['url'] ?? '', $log['method'] ?? '', $log['user_agent'] ?? '',
+                    json_encode($log['context'] ?? [], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES)
+                ], ';');
+            }
+            rewind($csv);
+            $zip->addFromString('admin-actions.csv', stream_get_contents($csv));
+            fclose($csv);
+            $zip->close();
+            $filename = spidercms_log_export_filename('zip');
+            spidercms_send_download_headers($filename, 'application/zip');
+            readfile($tmp);
+            @unlink($tmp);
+            exit;
+        }
+    }
+
+    // CSV domyślnie.
+    $filename = spidercms_log_export_filename('csv');
+    spidercms_send_download_headers($filename, 'text/csv; charset=utf-8');
+    echo "\xEF\xBB\xBF";
+    $out = fopen('php://output', 'w');
+    fputcsv($out, ['czas','status','akcja','etykieta','ip','url','metoda','user_agent','szczegoly'], ';');
+    foreach ($logs as $log) {
+        fputcsv($out, [
+            $log['time'] ?? '', $log['status'] ?? '', $log['action'] ?? '', $log['label'] ?? '',
+            $log['ip'] ?? '', $log['url'] ?? '', $log['method'] ?? '', $log['user_agent'] ?? '',
+            json_encode($log['context'] ?? [], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES)
+        ], ';');
+    }
+    fclose($out);
+    exit;
+}
+
+function spidercms_log_status_badge($status) {
+    $status = (string)$status;
+    if ($status === 'success') return '<span class="log-badge success">OK</span>';
+    if ($status === 'error') return '<span class="log-badge error">Błąd</span>';
+    if ($status === 'warning') return '<span class="log-badge warning">Uwaga</span>';
+    return '<span class="log-badge info">Info</span>';
+}
+
+spidercms_logs_bootstrap();
+
+// ----------------------------------------------------------------------
+// SPIDERCMS SECURITY HARDENING START
+// Dodatkowe zabezpieczenia serwerowe dla hostingu produkcyjnego.
+// ----------------------------------------------------------------------
+
+// Bezpieczniejsze ciasteczko sesji — działa najlepiej przed session_start,
+// ale poniższe ustawienia też wzmacniają obecną sesję, jeśli serwer na to pozwala.
+if (PHP_SESSION_ACTIVE === session_status()) {
+    @ini_set('session.use_only_cookies', '1');
+    @ini_set('session.use_strict_mode', '1');
+    @ini_set('session.cookie_httponly', '1');
+    if (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') {
+        @ini_set('session.cookie_secure', '1');
+    }
+}
+
+// Dodatkowe nagłówki bezpieczeństwa.
+// Uwaga: nie dodaję bardzo agresywnego CSP, żeby nie zepsuć TinyMCE/CDN/fontawesome.
+if (!headers_sent()) {
+    header('X-Permitted-Cross-Domain-Policies: none');
+    header('Cross-Origin-Resource-Policy: same-origin');
+    header('Cross-Origin-Opener-Policy: same-origin');
+    header('X-Download-Options: noopen');
+}
+
+// Bezpieczny zapis JSON.
+function spidercms_safe_write_json($file, array $data) {
+    $dir = dirname($file);
+    if (!is_dir($dir)) {
+        @mkdir($dir, 0755, true);
+    }
+
+    $tmp = $file . '.tmp';
+    $json = json_encode($data, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+
+    if ($json === false) {
+        return false;
+    }
+
+    $ok = @file_put_contents($tmp, $json, LOCK_EX);
+    if ($ok === false) {
+        return false;
+    }
+
+    @chmod($tmp, 0640);
+    return @rename($tmp, $file);
+}
+
+// Minimalny log bezpieczeństwa.
+function spidercms_security_log($event, array $context = []) {
+    $dir = __DIR__ . '/.logs';
+    if (!is_dir($dir)) {
+        @mkdir($dir, 0750, true);
+    }
+
+    $file = $dir . '/security.jsonl';
+
+    $entry = [
+        'time' => date('Y-m-d H:i:s'),
+        'event' => (string)$event,
+        'ip' => $_SERVER['REMOTE_ADDR'] ?? '',
+        'ua' => substr((string)($_SERVER['HTTP_USER_AGENT'] ?? ''), 0, 250),
+        'context' => $context,
+    ];
+
+    @file_put_contents(
+        $file,
+        json_encode($entry, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) . "\n",
+        FILE_APPEND | LOCK_EX
+    );
+    @chmod($file, 0640);
+}
+
+// Sprawdzenie rozszerzeń i nazw uploadów.
+function spidercms_is_safe_upload_name($name) {
+    $name = basename((string)$name);
+    if ($name === '' || preg_match('/[\/\\\\]/', $name)) {
+        return false;
+    }
+
+    // Blokada podwójnych rozszerzeń typu obraz.php.jpg oraz plików wykonywalnych.
+    if (preg_match('/\.(php|php[0-9]?|phtml|phar|cgi|pl|py|sh|bash|exe|dll|bat|cmd|js|html?|shtml|svgz)(\.|$)/i', $name)) {
+        return false;
+    }
+
+    return true;
+}
+
+function spidercms_safe_uploaded_image_ext($filename) {
+    $ext = strtolower(pathinfo((string)$filename, PATHINFO_EXTENSION));
+    return in_array($ext, ['jpg','jpeg','png','gif','webp','svg'], true);
+}
+
+function spidercms_secure_uploads_htaccess() {
+    $uploads = __DIR__ . '/uploads';
+    if (!is_dir($uploads)) {
+        @mkdir($uploads, 0755, true);
+    }
+
+    $htaccess = <<<'HTACCESS'
+Options -Indexes
+RemoveHandler .php .php3 .php4 .php5 .php7 .php8 .phtml .phar .cgi .pl .py .sh
+RemoveType .php .php3 .php4 .php5 .php7 .php8 .phtml .phar .cgi .pl .py .sh
+<FilesMatch "\.(php|php[0-9]?|phtml|phar|cgi|pl|py|sh|bash|exe|dll|bat|cmd)$">
+    Require all denied
+    Deny from all
+</FilesMatch>
+<IfModule mod_php.c>
+    php_flag engine off
+</IfModule>
+HTACCESS;
+
+    @file_put_contents($uploads . '/.htaccess', $htaccess, LOCK_EX);
+    @chmod($uploads . '/.htaccess', 0644);
+}
+
+// Blokada bezpośredniego dostępu do prywatnych katalogów flat-file.
+function spidercms_secure_private_dirs() {
+    $private_dirs = [
+        __DIR__ . '/.chat',
+        __DIR__ . '/.logs',
+        __DIR__ . '/.stats',
+        __DIR__ . '/.backups',
+    ];
+
+    $private_htaccess = <<<'HTACCESS'
+Options -Indexes
+Require all denied
+Deny from all
+HTACCESS;
+
+    foreach ($private_dirs as $dir) {
+        if (!is_dir($dir)) {
+            @mkdir($dir, 0750, true);
+        }
+        @file_put_contents($dir . '/.htaccess', $private_htaccess, LOCK_EX);
+        @chmod($dir . '/.htaccess', 0644);
+    }
+}
+
+// Ochrona plików ukrytych i konfiguracyjnych w katalogu CMS.
+// Działa na Apache/home.pl, nie powinno psuć publicznych stron.
+function spidercms_write_root_security_htaccess() {
+    $file = __DIR__ . '/.htaccess';
+
+    $block = <<<'HTACCESS'
+
+# BEGIN SpiderCMS Security
+Options -Indexes
+
+<FilesMatch "^\.">
+    Require all denied
+    Deny from all
+</FilesMatch>
+
+<FilesMatch "\.(json|jsonl|log|bak|tmp|sql|sqlite|db|env|ini|lock)$">
+    Require all denied
+    Deny from all
+</FilesMatch>
+
+<FilesMatch "^(config\.php|composer\.json|composer\.lock)$">
+    Require all denied
+    Deny from all
+</FilesMatch>
+
+<IfModule mod_headers.c>
+    Header always set X-Frame-Options "SAMEORIGIN"
+    Header always set X-Content-Type-Options "nosniff"
+    Header always set Referrer-Policy "strict-origin-when-cross-origin"
+    Header always set Permissions-Policy "camera=(), microphone=(), geolocation=()"
+</IfModule>
+# END SpiderCMS Security
+
+HTACCESS;
+
+    $current = is_file($file) ? (string)@file_get_contents($file) : '';
+    if (strpos($current, '# BEGIN SpiderCMS Security') === false) {
+        @file_put_contents($file, rtrim($current) . "\n" . $block, LOCK_EX);
+        @chmod($file, 0644);
+    }
+}
+
+// Walidacja adresu powrotu / URL wewnętrznego.
+function spidercms_safe_internal_redirect($url, $fallback = 'admin.php') {
+    $url = trim((string)$url);
+    if ($url === '' || preg_match('~^(https?:)?//~i', $url) || str_contains($url, "\n") || str_contains($url, "\r")) {
+        return $fallback;
+    }
+    return $url;
+}
+
+// Jednorazowe zabezpieczenia katalogów.
+spidercms_secure_uploads_htaccess();
+spidercms_secure_private_dirs();
+spidercms_write_root_security_htaccess();
+
+// Logowanie podejrzanych metod HTTP.
+$allowed_methods = ['GET', 'POST', 'HEAD'];
+if (!in_array($_SERVER['REQUEST_METHOD'] ?? 'GET', $allowed_methods, true)) {
+    spidercms_security_log('blocked_http_method', ['method' => $_SERVER['REQUEST_METHOD'] ?? '']);
+    http_response_code(405);
+    exit('Method not allowed');
+}
+// SPIDERCMS SECURITY HARDENING END
+
+
 // ----------------------------------------------------------------------
 // Obsługa wylogowania
 // ----------------------------------------------------------------------
 if (isset($_GET['logout']) && $_GET['logout'] === '1') {
+    spidercms_log_action('logout', 'success');
     $_SESSION = [];
     session_destroy();
     header('Location: admin.php');
@@ -156,6 +569,18 @@ if (!is_array($settings)) {
 if (!array_key_exists('header_enabled', $settings)) {
     $settings['header_enabled'] = '1';
 }
+if (!array_key_exists('show_site_name_in_header', $settings)) {
+    $settings['show_site_name_in_header'] = '0';
+}
+if (!array_key_exists('header_title_font_size', $settings)) $settings['header_title_font_size'] = '22';
+if (!array_key_exists('header_title_font_weight', $settings)) $settings['header_title_font_weight'] = '800';
+if (!array_key_exists('header_title_color', $settings)) $settings['header_title_color'] = '';
+if (!array_key_exists('header_title_gap', $settings)) $settings['header_title_gap'] = '10';
+if (!array_key_exists('header_title_uppercase', $settings)) $settings['header_title_uppercase'] = '0';
+if (!array_key_exists('header_title_italic', $settings)) $settings['header_title_italic'] = '0';
+if (!array_key_exists('header_title_shadow', $settings)) $settings['header_title_shadow'] = '0';
+if (!array_key_exists('header_title_bg', $settings)) $settings['header_title_bg'] = '';
+if (!array_key_exists('header_title_radius', $settings)) $settings['header_title_radius'] = '0';
 
 // Jako domyślne logo ustawiamy nową grafikę z pająkiem
 $logo_url = $settings['logo'] ?? (BASE_URL . 'assets/images/spidercms-icon.png');
@@ -198,6 +623,41 @@ function theme_value($key, $default = '') {
 function css_px($value, $default) {
     $value = preg_replace('/[^0-9.]/', '', (string)$value);
     return $value !== '' ? $value . 'px' : $default . 'px';
+}
+
+
+function spidercms_clean_slug($slug) {
+    $slug = trim((string)$slug);
+    $slug = strtolower($slug);
+    $map = [
+        'ą'=>'a','ć'=>'c','ę'=>'e','ł'=>'l','ń'=>'n','ó'=>'o','ś'=>'s','ż'=>'z','ź'=>'z',
+        'Ą'=>'a','Ć'=>'c','Ę'=>'e','Ł'=>'l','Ń'=>'n','Ó'=>'o','Ś'=>'s','Ż'=>'z','Ź'=>'z'
+    ];
+    $slug = strtr($slug, $map);
+    $slug = preg_replace('/[^a-z0-9\-_]+/i', '-', $slug);
+    $slug = trim($slug, '-_');
+    return $slug;
+}
+
+function spidercms_page_get_title_from_source($source, $fallback_slug = '') {
+    if (preg_match('/\$title\s*=\s*([\'\"])(.*?)\1\s*;/s', (string)$source, $m)) {
+        return stripcslashes($m[2]);
+    }
+    if (preg_match('/<title>(.*?)<\/title>/is', (string)$source, $m)) {
+        return trim(strip_tags($m[1]));
+    }
+    return $fallback_slug !== '' ? ucwords(str_replace(['-', '_'], ' ', $fallback_slug)) : '';
+}
+
+function spidercms_page_set_title_in_source($source, $title) {
+    $title_php = addcslashes((string)$title, "\\'");
+    $source = (string)$source;
+    $count = 0;
+    $source = preg_replace('/\$title\s*=\s*([\'\"])(.*?)\1\s*;/s', "\$title = '" . $title_php . "';", $source, 1, $count);
+    if ($count === 0) {
+        $source = "<?php\n\$title = '" . $title_php . "';\n?>\n" . $source;
+    }
+    return $source;
 }
 
 // ----------------------------------------------------------------------
@@ -292,6 +752,17 @@ $chat_settings_defaults = [
     'welcome' => 'Cześć! W czym możemy pomóc?',
     'button_text' => 'Chat',
     'admin_name' => 'Administrator',
+    'email_notifications' => '0',
+    'admin_email' => '',
+    'from_email' => '',
+    'mail_method' => 'smtp',
+    'smtp_host' => '',
+    'smtp_port' => '465',
+    'smtp_secure' => 'ssl',
+    'smtp_username' => '',
+    'smtp_password' => '',
+    'email_last_status' => '',
+    'email_last_time' => '',
 ];
 $chat_settings_loaded = file_exists($chat_settings_file) ? json_decode(file_get_contents($chat_settings_file), true) : [];
 if (!is_array($chat_settings_loaded)) $chat_settings_loaded = [];
@@ -644,6 +1115,235 @@ function chat_send_json($payload) {
     exit;
 }
 
+function chat_email_log($message) {
+    global $chat_dir;
+    $line = '[' . date('Y-m-d H:i:s') . '] ' . $message . "\n";
+    @file_put_contents($chat_dir . '/email.log', $line, FILE_APPEND | LOCK_EX);
+}
+
+function chat_smtp_read($socket) {
+    $data = '';
+    while (($line = fgets($socket, 515)) !== false) {
+        $data .= $line;
+        if (strlen($line) >= 4 && $line[3] === ' ') {
+            break;
+        }
+    }
+    return $data;
+}
+
+function chat_smtp_expect($socket, $codes, &$last_response, $step) {
+    $last_response = chat_smtp_read($socket);
+    $code = (int)substr($last_response, 0, 3);
+    if (!in_array($code, (array)$codes, true)) {
+        chat_email_log('SMTP BŁĄD [' . $step . '] Odpowiedź: ' . trim($last_response));
+        return false;
+    }
+    return true;
+}
+
+function chat_smtp_command($socket, $command, $codes, &$last_response, $step) {
+    fwrite($socket, $command . "\r\n");
+    return chat_smtp_expect($socket, $codes, $last_response, $step);
+}
+
+function chat_send_smtp_mail($to, $subject, $body, $from_email, $from_name = 'SpiderCMS', $reply_to = '') {
+    global $chat_settings;
+
+    $host = trim((string)($chat_settings['smtp_host'] ?? ''));
+    $port = (int)($chat_settings['smtp_port'] ?? 465);
+    $secure = strtolower(trim((string)($chat_settings['smtp_secure'] ?? 'ssl')));
+    $username = trim((string)($chat_settings['smtp_username'] ?? ''));
+    $password = (string)($chat_settings['smtp_password'] ?? '');
+
+    if ($host === '' || $port <= 0 || $username === '' || $password === '') {
+        chat_email_log('SMTP BŁĄD: brak hosta, portu, loginu albo hasła SMTP.');
+        return false;
+    }
+
+    $remote = ($secure === 'ssl' ? 'ssl://' : '') . $host . ':' . $port;
+    $errno = 0;
+    $errstr = '';
+    $context = stream_context_create([
+        'ssl' => [
+            'verify_peer' => true,
+            'verify_peer_name' => true,
+            'allow_self_signed' => false,
+        ]
+    ]);
+
+    $socket = @stream_socket_client($remote, $errno, $errstr, 20, STREAM_CLIENT_CONNECT, $context);
+    if (!$socket) {
+        chat_email_log('SMTP BŁĄD: nie można połączyć z ' . $remote . ' | ' . $errno . ' ' . $errstr);
+        return false;
+    }
+
+    stream_set_timeout($socket, 20);
+    $last = '';
+
+    if (!chat_smtp_expect($socket, [220], $last, 'connect')) { fclose($socket); return false; }
+
+    $server_name = $_SERVER['HTTP_HOST'] ?? 'localhost';
+    if (!chat_smtp_command($socket, 'EHLO ' . $server_name, [250], $last, 'EHLO')) { fclose($socket); return false; }
+
+    if ($secure === 'tls') {
+        if (!chat_smtp_command($socket, 'STARTTLS', [220], $last, 'STARTTLS')) { fclose($socket); return false; }
+        if (!stream_socket_enable_crypto($socket, true, STREAM_CRYPTO_METHOD_TLS_CLIENT)) {
+            chat_email_log('SMTP BŁĄD: nie udało się włączyć TLS.');
+            fclose($socket);
+            return false;
+        }
+        if (!chat_smtp_command($socket, 'EHLO ' . $server_name, [250], $last, 'EHLO po STARTTLS')) { fclose($socket); return false; }
+    }
+
+    if (!chat_smtp_command($socket, 'AUTH LOGIN', [334], $last, 'AUTH LOGIN')) { fclose($socket); return false; }
+    if (!chat_smtp_command($socket, base64_encode($username), [334], $last, 'SMTP USER')) { fclose($socket); return false; }
+    if (!chat_smtp_command($socket, base64_encode($password), [235], $last, 'SMTP PASS')) { fclose($socket); return false; }
+
+    $safe_from = str_replace(["\r", "\n"], '', $from_email);
+    $safe_to = str_replace(["\r", "\n"], '', $to);
+
+    if (!chat_smtp_command($socket, 'MAIL FROM:<' . $safe_from . '>', [250], $last, 'MAIL FROM')) { fclose($socket); return false; }
+    if (!chat_smtp_command($socket, 'RCPT TO:<' . $safe_to . '>', [250, 251], $last, 'RCPT TO')) { fclose($socket); return false; }
+    if (!chat_smtp_command($socket, 'DATA', [354], $last, 'DATA')) { fclose($socket); return false; }
+
+    $encoded_subject = '=?UTF-8?B?' . base64_encode($subject) . '?=';
+    $encoded_from_name = '=?UTF-8?B?' . base64_encode($from_name) . '?=';
+
+    $headers = [];
+    $headers[] = 'Date: ' . date('r');
+    $headers[] = 'From: ' . $encoded_from_name . ' <' . $safe_from . '>';
+    $headers[] = 'To: <' . $safe_to . '>';
+    $headers[] = 'Subject: ' . $encoded_subject;
+    $headers[] = 'MIME-Version: 1.0';
+    $headers[] = 'Content-Type: text/plain; charset=UTF-8';
+    $headers[] = 'Content-Transfer-Encoding: 8bit';
+    $headers[] = 'X-Mailer: SpiderCMS SMTP';
+
+    if ($reply_to !== '' && filter_var($reply_to, FILTER_VALIDATE_EMAIL)) {
+        $headers[] = 'Reply-To: <' . str_replace(["\r", "\n"], '', $reply_to) . '>';
+    }
+
+    // SMTP wymaga kropkowania linii zaczynających się od kropki.
+    $body = str_replace(["\r\n", "\r"], "\n", $body);
+    $body = preg_replace('/^\./m', '..', $body);
+    $message = implode("\r\n", $headers) . "\r\n\r\n" . str_replace("\n", "\r\n", $body) . "\r\n.";
+
+    fwrite($socket, $message . "\r\n");
+    if (!chat_smtp_expect($socket, [250], $last, 'wysyłka treści')) { fclose($socket); return false; }
+
+    chat_smtp_command($socket, 'QUIT', [221, 250], $last, 'QUIT');
+    fclose($socket);
+
+    chat_email_log('SMTP OK | do=' . $safe_to . ' | from=' . $safe_from . ' | host=' . $host . ':' . $port . ' | secure=' . $secure);
+    return true;
+}
+
+function chat_notify_admin_by_email($conversation_id, $visitor_name, $visitor_email, $message, $force = false) {
+    global $chat_settings;
+
+    if (!$force && (($chat_settings['email_notifications'] ?? '0') !== '1')) {
+        chat_email_log('Powiadomienie pominięte: opcja email_notifications jest wyłączona.');
+        return false;
+    }
+
+    $admin_email = trim((string)($chat_settings['admin_email'] ?? ''));
+    if ($admin_email === '' || !filter_var($admin_email, FILTER_VALIDATE_EMAIL)) {
+        chat_email_log('Powiadomienie pominięte: brak poprawnego adresu administratora.');
+        return false;
+    }
+
+    $visitor_name = chat_clean_text($visitor_name ?: 'Gość strony', 120);
+    $visitor_email = chat_clean_text($visitor_email, 160);
+    $message = chat_clean_text($message, 2000);
+
+    $site = defined('SITE_NAME') ? SITE_NAME : 'SpiderCMS';
+    $subject = 'Nowa wiadomość na chacie - ' . $site;
+
+    $admin_url = '';
+    $scheme = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http';
+    $host = $_SERVER['HTTP_HOST'] ?? '';
+    if ($host !== '') {
+        $admin_url = $scheme . '://' . $host . rtrim((string)(defined('BASE_URL') ? BASE_URL : ''), '/') . '/admin.php?tab=chat&conversation=' . rawurlencode((string)$conversation_id);
+    }
+
+    $body = "Nowa wiadomość z chatu strony.\n\n";
+    $body .= "Od: " . $visitor_name . "\n";
+    if ($visitor_email !== '') {
+        $body .= "E-mail użytkownika: " . $visitor_email . "\n";
+    }
+    $body .= "Data: " . date('Y-m-d H:i:s') . "\n";
+    $body .= "ID rozmowy: " . $conversation_id . "\n\n";
+    $body .= "Treść wiadomości:\n" . $message . "\n";
+    if ($admin_url !== '') {
+        $body .= "\nOtwórz rozmowę w panelu:\n" . $admin_url . "\n";
+    }
+
+    $configured_from = trim((string)($chat_settings['from_email'] ?? ''));
+    $domain = preg_replace('/^www\./', '', (string)$host);
+    $domain = preg_replace('/:\d+$/', '', $domain);
+
+    if ($configured_from !== '' && filter_var($configured_from, FILTER_VALIDATE_EMAIL)) {
+        $from_email = $configured_from;
+    } elseif ($domain !== '' && strpos($domain, '.') !== false) {
+        $from_email = 'no-reply@' . $domain;
+    } else {
+        $from_email = $admin_email;
+    }
+
+    $mail_method = strtolower(trim((string)($chat_settings['mail_method'] ?? 'smtp')));
+    $reply_to = '';
+    if ($visitor_email !== '' && filter_var($visitor_email, FILTER_VALIDATE_EMAIL)) {
+        $reply_to = $visitor_email;
+    }
+
+    if ($mail_method === 'smtp') {
+        return chat_send_smtp_mail($admin_email, $subject, $body, $from_email, 'SpiderCMS', $reply_to);
+    }
+
+    // Awaryjny tryb PHP mail(). Na home.pl lepiej używać SMTP.
+    $encoded_subject = '=?UTF-8?B?' . base64_encode($subject) . '?=';
+    $safe_from_header = str_replace(["\r", "\n"], '', $from_email);
+    $safe_admin_email = str_replace(["\r", "\n"], '', $admin_email);
+
+    $headers = [];
+    $headers[] = 'MIME-Version: 1.0';
+    $headers[] = 'Content-Type: text/plain; charset=UTF-8';
+    $headers[] = 'Content-Transfer-Encoding: 8bit';
+    $headers[] = 'From: SpiderCMS <' . $safe_from_header . '>';
+    $headers[] = 'Sender: ' . $safe_from_header;
+    $headers[] = 'X-Mailer: PHP/' . phpversion();
+
+    if ($reply_to !== '') {
+        $headers[] = 'Reply-To: <' . str_replace(["\r", "\n"], '', $reply_to) . '>';
+    }
+
+    $params = '';
+    if (filter_var($from_email, FILTER_VALIDATE_EMAIL)) {
+        $params = '-f' . escapeshellarg($from_email);
+    }
+
+    $ok = false;
+    $last_error = '';
+
+    set_error_handler(function($severity, $msg) use (&$last_error) {
+        $last_error = $msg;
+        return true;
+    });
+
+    if ($params !== '') {
+        $ok = mail($safe_admin_email, $encoded_subject, $body, implode("\r\n", $headers), $params);
+    } else {
+        $ok = mail($safe_admin_email, $encoded_subject, $body, implode("\r\n", $headers));
+    }
+
+    restore_error_handler();
+
+    chat_email_log(($ok ? 'PHP mail() OK' : 'PHP mail() BŁĄD') . ' | do=' . $safe_admin_email . ' | from=' . $from_email . ($last_error ? ' | PHP: ' . $last_error : ''));
+
+    return $ok;
+}
+
 function chat_public_add_message($name, $email, $message, $website = '') {
     if (trim((string)$website) !== '') {
         return ['ok' => false, 'error' => 'Wiadomość odrzucona.'];
@@ -694,6 +1394,15 @@ function chat_public_add_message($name, $email, $message, $website = '') {
         'email' => $data[$visitor_id]['email'] ?? '',
         'ip_hash' => $data[$visitor_id]['ip_hash'] ?? '',
     ]);
+
+    // Powiadomienie e-mail do administratora o nowej wiadomości użytkownika.
+    chat_notify_admin_by_email(
+        $visitor_id,
+        $data[$visitor_id]['name'] ?? 'Gość strony',
+        $data[$visitor_id]['email'] ?? '',
+        $message
+    );
+
     chat_save_conversations($data);
     return ['ok' => true, 'conversation_id' => $visitor_id];
 }
@@ -953,6 +1662,413 @@ function chat_sync_widget_in_pages() {
 
 chat_write_widget_file();
 
+
+// ----------------------------------------------------------------------
+// STATYSTYKI ODWIEDZIN – flat-file, bez bazy danych
+// ----------------------------------------------------------------------
+$stats_dir = __DIR__ . '/.stats';
+if (!is_dir($stats_dir)) {
+    @mkdir($stats_dir, 0755, true);
+}
+spidercms_write_htaccess($stats_dir, "Require all denied\nDeny from all\nOptions -Indexes\n");
+
+$stats_settings_file = $stats_dir . '/settings.json';
+$stats_settings_defaults = [
+    'enabled' => '1',
+    'throttle_minutes' => '30',
+    'online_minutes' => '5',
+    'ignore_admin' => '1',
+    'ignore_bots' => '1',
+];
+$stats_settings_loaded = file_exists($stats_settings_file) ? json_decode((string)file_get_contents($stats_settings_file), true) : [];
+if (!is_array($stats_settings_loaded)) $stats_settings_loaded = [];
+$stats_settings = array_merge($stats_settings_defaults, $stats_settings_loaded);
+
+function stats_json_read($name, $default = []) {
+    global $stats_dir;
+    $file = $stats_dir . '/' . $name;
+    if (!file_exists($file)) return $default;
+    $data = json_decode((string)file_get_contents($file), true);
+    return is_array($data) ? $data : $default;
+}
+
+function stats_json_write($name, $data) {
+    global $stats_dir;
+    return file_put_contents($stats_dir . '/' . $name, json_encode($data, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES), LOCK_EX) !== false;
+}
+
+function stats_clean_text($value, $max = 250) {
+    $value = trim(strip_tags((string)$value));
+    $value = preg_replace('/\s+/', ' ', $value);
+    if (function_exists('mb_substr')) return mb_substr($value, 0, $max, 'UTF-8');
+    return substr($value, 0, $max);
+}
+
+function stats_is_bot($ua) {
+    return preg_match('~bot|crawl|spider|slurp|bingpreview|facebookexternalhit|whatsapp|telegrambot|curl|wget|python|monitor|uptime~i', (string)$ua) === 1;
+}
+
+function stats_device_type($ua) {
+    $ua = strtolower((string)$ua);
+    if (strpos($ua, 'tablet') !== false || strpos($ua, 'ipad') !== false) return 'Tablet';
+    if (strpos($ua, 'mobile') !== false || strpos($ua, 'android') !== false || strpos($ua, 'iphone') !== false) return 'Telefon';
+    return 'Komputer';
+}
+
+function stats_browser_name($ua) {
+    $ua = (string)$ua;
+    if (stripos($ua, 'Edg/') !== false) return 'Edge';
+    if (stripos($ua, 'OPR/') !== false || stripos($ua, 'Opera') !== false) return 'Opera';
+    if (stripos($ua, 'Firefox/') !== false) return 'Firefox';
+    if (stripos($ua, 'Safari/') !== false && stripos($ua, 'Chrome/') === false) return 'Safari';
+    if (stripos($ua, 'Chrome/') !== false) return 'Chrome';
+    return 'Inna';
+}
+
+function stats_referrer_domain($ref) {
+    $ref = trim((string)$ref);
+    if ($ref === '') return 'Wejście bezpośrednie';
+    $host = parse_url($ref, PHP_URL_HOST);
+    return $host ? strtolower($host) : 'Inne';
+}
+
+function stats_increment_assoc(&$array, $key, $by = 1) {
+    $key = stats_clean_text($key, 180);
+    if ($key === '') $key = 'Inne';
+    $array[$key] = (int)($array[$key] ?? 0) + $by;
+}
+
+function stats_track_event($payload) {
+    global $stats_settings;
+    if (($stats_settings['enabled'] ?? '1') !== '1') return ['ok' => false, 'ignored' => 'disabled'];
+    if (($stats_settings['ignore_admin'] ?? '1') === '1' && !empty($_SESSION['logged_in'])) return ['ok' => true, 'ignored' => 'admin'];
+
+    $ua = $_SERVER['HTTP_USER_AGENT'] ?? '';
+    if (($stats_settings['ignore_bots'] ?? '1') === '1' && stats_is_bot($ua)) return ['ok' => true, 'ignored' => 'bot'];
+
+    $path = stats_clean_text($payload['path'] ?? ($_SERVER['HTTP_REFERER'] ?? '/'), 350);
+    $title = stats_clean_text($payload['title'] ?? '', 180);
+    $ref = stats_clean_text($payload['referrer'] ?? '', 400);
+    $visitor = stats_clean_text($payload['visitor'] ?? '', 120);
+    if ($visitor === '') $visitor = hash('sha256', spidercms_client_ip() . '|' . $ua);
+
+    $today = date('Y-m-d');
+    $now = time();
+    $visitor_hash = hash('sha256', $visitor . '|' . spidercms_client_ip());
+    $throttle = max(1, (int)($stats_settings['throttle_minutes'] ?? 30)) * 60;
+
+    $recent = stats_json_read('recent.json', []);
+    foreach ($recent as $k => $t) {
+        if (!is_int($t) && !ctype_digit((string)$t)) unset($recent[$k]);
+        elseif ((int)$t < $now - 86400) unset($recent[$k]);
+    }
+    $recent_key = hash('sha256', $visitor_hash . '|' . $path);
+    if (isset($recent[$recent_key]) && (int)$recent[$recent_key] > $now - $throttle) {
+        stats_json_write('recent.json', $recent);
+        return ['ok' => true, 'ignored' => 'throttle'];
+    }
+    $recent[$recent_key] = $now;
+    stats_json_write('recent.json', $recent);
+
+    $daily = stats_json_read('visits_daily.json', []);
+    stats_increment_assoc($daily, $today);
+    stats_json_write('visits_daily.json', $daily);
+
+    $unique = stats_json_read('unique_daily.json', []);
+    if (!isset($unique[$today]) || !is_array($unique[$today])) $unique[$today] = [];
+    $unique[$today][$visitor_hash] = $now;
+    if (count($unique) > 120) {
+        ksort($unique);
+        $unique = array_slice($unique, -120, null, true);
+    }
+    stats_json_write('unique_daily.json', $unique);
+
+    $pages = stats_json_read('page_views.json', []);
+    if (!isset($pages[$path])) $pages[$path] = ['title' => $title ?: $path, 'views' => 0, 'last' => ''];
+    $pages[$path]['title'] = $title ?: ($pages[$path]['title'] ?? $path);
+    $pages[$path]['views'] = (int)($pages[$path]['views'] ?? 0) + 1;
+    $pages[$path]['last'] = date('Y-m-d H:i:s');
+    stats_json_write('page_views.json', $pages);
+
+    $devices = stats_json_read('devices.json', []);
+    stats_increment_assoc($devices, stats_device_type($ua));
+    stats_json_write('devices.json', $devices);
+
+    $browsers = stats_json_read('browsers.json', []);
+    stats_increment_assoc($browsers, stats_browser_name($ua));
+    stats_json_write('browsers.json', $browsers);
+
+    $refs = stats_json_read('referrers.json', []);
+    $own_host = $_SERVER['HTTP_HOST'] ?? '';
+    $ref_domain = stats_referrer_domain($ref);
+    if ($ref_domain !== '' && $ref_domain !== strtolower($own_host)) stats_increment_assoc($refs, $ref_domain);
+    stats_json_write('referrers.json', $refs);
+
+    $online = stats_json_read('online.json', []);
+    foreach ($online as $k => $row) {
+        if (!is_array($row) || (int)($row['time'] ?? 0) < $now - max(60, (int)($stats_settings['online_minutes'] ?? 5) * 60)) unset($online[$k]);
+    }
+    $online[$visitor_hash] = ['time' => $now, 'path' => $path, 'title' => $title ?: $path];
+    stats_json_write('online.json', $online);
+
+    $events_file = $GLOBALS['stats_dir'] . '/events.jsonl';
+    $event = ['time' => date('Y-m-d H:i:s'), 'path' => $path, 'title' => $title, 'device' => stats_device_type($ua), 'browser' => stats_browser_name($ua), 'referrer' => $ref_domain];
+    @file_put_contents($events_file, json_encode($event, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) . "\n", FILE_APPEND | LOCK_EX);
+
+    return ['ok' => true];
+}
+
+function stats_get_summary() {
+    global $stats_settings;
+    $daily = stats_json_read('visits_daily.json', []);
+    $unique = stats_json_read('unique_daily.json', []);
+    $pages = stats_json_read('page_views.json', []);
+    $devices = stats_json_read('devices.json', []);
+    $browsers = stats_json_read('browsers.json', []);
+    $refs = stats_json_read('referrers.json', []);
+    $online = stats_json_read('online.json', []);
+    $now = time();
+    foreach ($online as $k => $row) {
+        if (!is_array($row) || (int)($row['time'] ?? 0) < $now - max(60, (int)($stats_settings['online_minutes'] ?? 5) * 60)) unset($online[$k]);
+    }
+    stats_json_write('online.json', $online);
+
+    $today = date('Y-m-d');
+    $yesterday = date('Y-m-d', strtotime('-1 day'));
+    $last7 = 0;
+    $last30 = [];
+    for ($i = 29; $i >= 0; $i--) {
+        $d = date('Y-m-d', strtotime('-' . $i . ' day'));
+        $v = (int)($daily[$d] ?? 0);
+        $last30[$d] = $v;
+        if ($i < 7) $last7 += $v;
+    }
+    $month_prefix = date('Y-m');
+    $month = 0;
+    foreach ($daily as $d => $v) if (strpos($d, $month_prefix) === 0) $month += (int)$v;
+    $total = array_sum(array_map('intval', $daily));
+
+    $unique_today = isset($unique[$today]) && is_array($unique[$today]) ? count($unique[$today]) : 0;
+
+    uasort($pages, fn($a,$b) => (int)($b['views'] ?? 0) <=> (int)($a['views'] ?? 0));
+    arsort($devices); arsort($browsers); arsort($refs);
+    return compact('daily','pages','devices','browsers','refs','online','last30','today','yesterday','last7','month','total','unique_today');
+}
+
+function stats_write_widget_file() {
+    $widget = <<<'PHP'
+<?php
+$stats_settings_file = __DIR__ . '/.stats/settings.json';
+$stats_settings = file_exists($stats_settings_file) ? json_decode((string)file_get_contents($stats_settings_file), true) : [];
+if (!is_array($stats_settings)) $stats_settings = [];
+if (($stats_settings['enabled'] ?? '1') !== '1') return;
+?>
+<script>
+(function(){
+  try{
+    var key = 'spidercms_stats_visitor_v1';
+    var visitor = localStorage.getItem(key);
+    if(!visitor){ visitor = 'v_' + Date.now() + '_' + Math.random().toString(16).slice(2); localStorage.setItem(key, visitor); }
+    var payload = new FormData();
+    payload.set('action','stats_track');
+    payload.set('visitor', visitor);
+    payload.set('path', location.pathname + location.search);
+    payload.set('title', document.title || '');
+    payload.set('referrer', document.referrer || '');
+    var candidates = [];
+    <?php if (defined('BASE_URL') && BASE_URL !== ''): ?>
+      candidates.push(<?php echo json_encode(rtrim(BASE_URL, '/') . '/admin.php'); ?>);
+    <?php endif; ?>
+    candidates.push('admin.php','../admin.php','../../admin.php','../../../admin.php','/admin.php');
+    var i = 0;
+    function sendNext(){
+      if(i >= candidates.length) return;
+      var url = candidates[i++];
+      fetch(url, {method:'POST', body:payload, credentials:'same-origin', cache:'no-store'}).then(function(r){
+        if(!r.ok) throw new Error('bad');
+        return r.json();
+      }).catch(sendNext);
+    }
+    if('requestIdleCallback' in window) requestIdleCallback(sendNext); else setTimeout(sendNext, 800);
+  }catch(e){}
+})();
+</script>
+PHP;
+    file_put_contents(__DIR__ . '/stats-widget.php', $widget);
+}
+
+function stats_sync_widget_in_pages() {
+    if (!defined('ACTIVE_PAGES_DIR')) return 0;
+    $include = "<?php require_once dirname(__DIR__, " . (int)ACTIVE_PAGES_DEPTH . ") . '/stats-widget.php'; ?>";
+    $updated = 0;
+    foreach (glob(ACTIVE_PAGES_DIR . '/*.php') ?: [] as $file) {
+        $content = file_get_contents($file);
+        if (strpos($content, 'stats-widget.php') !== false) continue;
+        if (stripos($content, '</body>') !== false) {
+            $content = str_ireplace('</body>', $include . "\n</body>", $content);
+            file_put_contents($file, $content);
+            $updated++;
+        }
+    }
+    return $updated;
+}
+
+stats_write_widget_file();
+// UWAGA: nie synchronizujemy stron automatycznie przy każdym odświeżeniu panelu.
+// stats_sync_widget_in_pages();
+
+
+// ----------------------------------------------------------------------
+// SLIDERY ZDJĘĆ – generator shortcode [slider id="..."]
+// ----------------------------------------------------------------------
+$sliders_dir = __DIR__ . '/.sliders';
+if (!is_dir($sliders_dir)) {
+    @mkdir($sliders_dir, 0755, true);
+}
+spidercms_write_htaccess($sliders_dir, "Require all denied\nDeny from all\nOptions -Indexes\n");
+$sliders_file = $sliders_dir . '/sliders.json';
+
+function slider_slug($value) {
+    $value = trim((string)$value);
+    $value = mb_strtolower($value, 'UTF-8');
+    $map = ['ą'=>'a','ć'=>'c','ę'=>'e','ł'=>'l','ń'=>'n','ó'=>'o','ś'=>'s','ż'=>'z','ź'=>'z'];
+    $value = strtr($value, $map);
+    $value = preg_replace('/[^a-z0-9_-]+/', '-', $value);
+    $value = trim($value, '-');
+    return $value !== '' ? $value : 'slider';
+}
+
+function slider_clean_url($url) {
+    $url = trim((string)$url);
+    if ($url === '') return '';
+    if (preg_match('~^(https?:)?//|^data:image/|^/~i', $url)) return $url;
+    return ltrim($url, '/');
+}
+
+function slider_load_all() {
+    global $sliders_file;
+    if (!file_exists($sliders_file)) return [];
+    $data = json_decode((string)file_get_contents($sliders_file), true);
+    return is_array($data) ? $data : [];
+}
+
+function slider_save_all($data) {
+    global $sliders_file;
+    if (!is_array($data)) $data = [];
+    file_put_contents($sliders_file, json_encode($data, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES), LOCK_EX);
+}
+
+function slider_normalize($input) {
+    $id = slider_slug($input['id'] ?? ($input['name'] ?? 'slider'));
+    $name = trim((string)($input['name'] ?? 'Slider'));
+    if ($name === '') $name = 'Slider';
+    $style = in_array(($input['style'] ?? 'modern'), ['modern','glass','minimal','dark','cards'], true) ? $input['style'] : 'modern';
+    $fit_mode = in_array(($input['fit_mode'] ?? 'contain'), ['contain','cover','auto'], true) ? $input['fit_mode'] : 'contain';
+    $height = max(180, min(900, (int)($input['height'] ?? 420)));
+    $autoplay = !empty($input['autoplay']) ? '1' : '0';
+    $interval = max(1500, min(20000, (int)($input['interval'] ?? 4500)));
+    $arrows = !empty($input['arrows']) ? '1' : '0';
+    $dots = !empty($input['dots']) ? '1' : '0';
+    $overlay = !empty($input['overlay']) ? '1' : '0';
+    $radius = max(0, min(40, (int)($input['radius'] ?? 18)));
+    $images = [];
+    $urls = $input['image_url'] ?? [];
+    $titles = $input['image_title'] ?? [];
+    $descs = $input['image_desc'] ?? [];
+    if (!is_array($urls)) $urls = [$urls];
+    if (!is_array($titles)) $titles = [$titles];
+    if (!is_array($descs)) $descs = [$descs];
+    $urls = array_values($urls);
+    $titles = array_values($titles);
+    $descs = array_values($descs);
+    foreach ($urls as $i => $url) {
+        $url = slider_clean_url($url);
+        if ($url === '') continue;
+        $images[] = [
+            'url' => $url,
+            'title' => trim((string)($titles[$i] ?? '')),
+            'desc' => trim((string)($descs[$i] ?? '')),
+        ];
+    }
+    return compact('id','name','style','fit_mode','height','autoplay','interval','arrows','dots','overlay','radius','images');
+}
+
+function slider_write_widget_file() {
+    $sliders = slider_load_all();
+    $payload = var_export($sliders, true);
+    $widget = <<<'PHP'
+<?php
+$spidercms_sliders = __PAYLOAD__;
+if (!is_array($spidercms_sliders) || empty($spidercms_sliders)) return;
+?>
+<style>
+.spidercms-slider{position:relative;overflow:hidden;width:100%;margin:1.5rem auto;border-radius:var(--slider-radius,18px);background:#0f172a;box-shadow:0 20px 50px rgba(15,23,42,.18)}
+.spidercms-slider-track{display:flex;height:100%;transition:transform .55s ease;will-change:transform}.spidercms-slide{position:relative;min-width:100%;height:100%;overflow:hidden;display:flex;align-items:center;justify-content:center;background:var(--slider-bg,#0f172a)}.spidercms-slide img{width:100%;height:100%;display:block}.spidercms-slider.fit-contain .spidercms-slide img{object-fit:contain;max-width:100%;max-height:100%;background:transparent}.spidercms-slider.fit-cover .spidercms-slide img{object-fit:cover}.spidercms-slider.fit-auto .spidercms-slide img{width:auto;height:auto;max-width:100%;max-height:100%;object-fit:contain}.spidercms-slide-caption{position:absolute;left:0;right:0;bottom:0;padding:clamp(1rem,3vw,2rem);color:#fff;background:linear-gradient(to top,rgba(0,0,0,.72),rgba(0,0,0,0));text-shadow:0 2px 10px rgba(0,0,0,.35)}.spidercms-slide-caption h3{margin:0 0 .35rem;font-size:clamp(1.35rem,3vw,2.4rem);line-height:1.1}.spidercms-slide-caption p{margin:0;max-width:720px;opacity:.92}.spidercms-slider.no-overlay .spidercms-slide-caption{background:transparent;text-shadow:0 2px 12px rgba(0,0,0,.65)}.spidercms-slider-arrow{position:absolute;top:50%;transform:translateY(-50%);z-index:5;width:44px;height:44px;border:0;border-radius:999px;background:rgba(255,255,255,.88);color:#111827;font-size:24px;display:flex;align-items:center;justify-content:center;cursor:pointer;box-shadow:0 8px 25px rgba(0,0,0,.18)}.spidercms-slider-arrow:hover{background:#fff}.spidercms-slider-prev{left:16px}.spidercms-slider-next{right:16px}.spidercms-slider-dots{position:absolute;left:0;right:0;bottom:14px;z-index:6;display:flex;gap:8px;justify-content:center}.spidercms-slider-dot{width:10px;height:10px;border-radius:999px;border:0;background:rgba(255,255,255,.55);cursor:pointer}.spidercms-slider-dot.active{background:#fff;transform:scale(1.25)}.spidercms-slider.style-glass{box-shadow:0 24px 70px rgba(0,0,0,.22);border:1px solid rgba(255,255,255,.25)}.spidercms-slider.style-minimal{box-shadow:none}.spidercms-slider.style-dark{background:#020617;box-shadow:0 24px 60px rgba(0,0,0,.35)}.spidercms-slider.style-cards{padding:10px;background:#fff}.spidercms-slider.style-cards .spidercms-slide img{border-radius:calc(var(--slider-radius,18px) - 6px)}@media(max-width:700px){.spidercms-slider{height:min(var(--slider-height,420px),60vh)!important}.spidercms-slider-arrow{width:38px;height:38px}.spidercms-slide-caption{padding:1rem 1rem 2.2rem}}
+</style>
+<script>
+(function(){
+  const sliders = <?php echo json_encode($spidercms_sliders, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES); ?> || {};
+  function esc(s){return String(s||'').replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[c];});}
+  function publicUrl(url){url=String(url||'').trim(); if(!url) return ''; if(/^(https?:)?\/\//i.test(url)||url[0]==='/'||/^data:image\//i.test(url)) return url; const depth=(location.pathname.match(/\//g)||[]).length-1; return '../'.repeat(Math.max(0,depth)) + url.replace(/^\/+/, '');}
+  function renderSlider(id){
+    const s = sliders[id]; if(!s || !Array.isArray(s.images) || !s.images.length) return '<div class="spidercms-slider-missing">Brak slidera: '+esc(id)+'</div>';
+    const h = parseInt(s.height||420,10); const radius=parseInt(s.radius||18,10);
+    const fit = ['contain','cover','auto'].includes(String(s.fit_mode||'contain')) ? String(s.fit_mode||'contain') : 'contain';
+    let html = '<div class="spidercms-slider style-'+esc(s.style||'modern')+' fit-'+esc(fit)+(s.overlay==='1'?'':' no-overlay')+'" data-autoplay="'+esc(s.autoplay||'0')+'" data-interval="'+esc(s.interval||4500)+'" style="height:'+h+'px;--slider-height:'+h+'px;--slider-radius:'+radius+'px">';
+    html += '<div class="spidercms-slider-track">';
+    s.images.forEach(function(img){ html += '<div class="spidercms-slide"><img src="'+esc(publicUrl(img.url))+'" alt="'+esc(img.title||s.name||'Slider')+'">'; if(img.title || img.desc){ html += '<div class="spidercms-slide-caption">'+(img.title?'<h3>'+esc(img.title)+'</h3>':'')+(img.desc?'<p>'+esc(img.desc)+'</p>':'')+'</div>'; } html += '</div>'; });
+    html += '</div>';
+    if(s.arrows==='1' && s.images.length>1){ html += '<button class="spidercms-slider-arrow spidercms-slider-prev" type="button" aria-label="Poprzedni">‹</button><button class="spidercms-slider-arrow spidercms-slider-next" type="button" aria-label="Następny">›</button>'; }
+    if(s.dots==='1' && s.images.length>1){ html += '<div class="spidercms-slider-dots">'+s.images.map(function(_,i){return '<button class="spidercms-slider-dot'+(i===0?' active':'')+'" type="button" data-i="'+i+'"></button>';}).join('')+'</div>'; }
+    html += '</div>'; return html;
+  }
+  function replaceShortcodes(root){
+    root = root || document.body;
+    const walker=document.createTreeWalker(root,NodeFilter.SHOW_TEXT,{acceptNode:function(n){return n.nodeValue.indexOf('[slider')!==-1?NodeFilter.FILTER_ACCEPT:NodeFilter.FILTER_REJECT;}});
+    const nodes=[]; while(walker.nextNode()) nodes.push(walker.currentNode);
+    nodes.forEach(function(n){
+      const span=document.createElement('span');
+      span.innerHTML = n.nodeValue.replace(/\[slider\s+id=["']?([a-zA-Z0-9_-]+)["']?\]/g,function(_,id){return renderSlider(id);});
+      n.parentNode.replaceChild(span,n);
+    });
+  }
+  function initSlider(el){
+    const track=el.querySelector('.spidercms-slider-track'); const slides=el.querySelectorAll('.spidercms-slide'); if(!track||slides.length<2) return;
+    let i=0; const dots=el.querySelectorAll('.spidercms-slider-dot');
+    function go(n){ i=(n+slides.length)%slides.length; track.style.transform='translateX('+(-i*100)+'%)'; dots.forEach(function(d,k){d.classList.toggle('active',k===i);}); }
+    const prev=el.querySelector('.spidercms-slider-prev'); const next=el.querySelector('.spidercms-slider-next'); if(prev) prev.onclick=function(){go(i-1)}; if(next) next.onclick=function(){go(i+1)}; dots.forEach(function(d){d.onclick=function(){go(parseInt(d.dataset.i||0,10));};});
+    if(el.dataset.autoplay==='1'){ setInterval(function(){go(i+1)}, Math.max(1500, parseInt(el.dataset.interval||4500,10))); }
+  }
+  function boot(){ replaceShortcodes(document.body); document.querySelectorAll('.spidercms-slider').forEach(initSlider); }
+  if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',boot); else boot();
+})();
+</script>
+PHP;
+    $widget = str_replace('__PAYLOAD__', $payload, $widget);
+    file_put_contents(__DIR__ . '/slider-widget.php', $widget);
+}
+
+function slider_sync_widget_in_pages() {
+    if (!defined('ACTIVE_PAGES_DIR')) return 0;
+    $include = "<?php require_once dirname(__DIR__, " . (int)ACTIVE_PAGES_DEPTH . ") . '/slider-widget.php'; ?>";
+    $updated = 0;
+    foreach (glob(ACTIVE_PAGES_DIR . '/*.php') ?: [] as $file) {
+        $content = file_get_contents($file);
+        if (strpos($content, 'slider-widget.php') !== false) continue;
+        if (stripos($content, '</body>') !== false) {
+            $content = str_ireplace('</body>', $include . "\n</body>", $content);
+            file_put_contents($file, $content);
+            $updated++;
+        }
+    }
+    return $updated;
+}
+
+slider_write_widget_file();
+// UWAGA: nie synchronizujemy stron automatycznie przy każdym odświeżeniu panelu.
+// slider_sync_widget_in_pages();
+
+
 // ----------------------------------------------------------------------
 // Funkcja aktualizująca kolory we wszystkich stronach
 // ----------------------------------------------------------------------
@@ -994,6 +2110,293 @@ function update_all_pages_colors() {
         }
     }
     return $updated;
+}
+
+
+// ----------------------------------------------------------------------
+// Wymuszenie aktualnego presetu/motywu na wszystkich stronach
+// Poprzednia wersja zapisywała preset, ale nie każda starsza strona
+// miała poprawnie aktualizowany blok :root. Ten fix dodaje końcowy CSS
+// z aktualnymi zmiennymi motywu do <head>, więc działa też na index.php.
+// ----------------------------------------------------------------------
+function spidercms_apply_theme_css_to_all_pages() {
+    global $theme;
+    // Zapisz globalny CSS presetu, żeby działał także na starszych stronach.
+    if (function_exists('spidercms_write_theme_css_file')) { spidercms_write_theme_css_file(); }
+    $updated = 0;
+    $files = [];
+
+    if (defined('ACTIVE_PAGES_DIR')) {
+        foreach (glob(ACTIVE_PAGES_DIR . '/*.php') ?: [] as $file) {
+            $files[] = $file;
+        }
+    }
+
+    foreach (spidercms_available_page_folders() as $folder) {
+        $dir = spidercms_page_folder_dir($folder);
+        foreach (glob($dir . '/*.php') ?: [] as $file) {
+            $files[] = $file;
+        }
+    }
+
+    $root_index = __DIR__ . '/index.php';
+    if (is_file($root_index)) {
+        $files[] = $root_index;
+    }
+
+    $files = array_values(array_unique($files));
+
+    $shadow = !empty($theme['shadow-enabled']) ? '0 2px 10px rgba(0,0,0,0.08)' : 'none';
+    $menu_position = $theme['menu-position'] ?? 'right';
+    if (!in_array($menu_position, ['left','center','right'], true)) {
+        $menu_position = 'right';
+    }
+
+    $css = "<style id=\"spidercms-theme-preset-fix\">\n";
+    $css .= ":root{\n";
+    $css .= "--primary:" . ($theme['primary'] ?? '#a855f7') . ";\n";
+    $css .= "--primary-dark:" . ($theme['primary-dark'] ?? '#7e22ce') . ";\n";
+    $css .= "--accent:" . ($theme['accent'] ?? '#2563eb') . ";\n";
+    $css .= "--page-bg:" . ($theme['page-bg'] ?? '#f9fafb') . ";\n";
+    $css .= "--page-text:" . ($theme['page-text'] ?? '#111827') . ";\n";
+    $css .= "--header-bg:" . ($theme['header-bg'] ?? '#ffffff') . ";\n";
+    $css .= "--header-text:" . ($theme['header-text'] ?? '#374151') . ";\n";
+    $css .= "--footer-bg:" . ($theme['footer-bg'] ?? '#1f2937') . ";\n";
+    $css .= "--footer-text:" . ($theme['footer-text'] ?? '#f3f4f6') . ";\n";
+    $css .= "--footer-muted:" . ($theme['footer-muted'] ?? '#9ca3af') . ";\n";
+    $css .= "--link-color:" . ($theme['link-color'] ?? '#a855f7') . ";\n";
+    $css .= "--button-bg:" . ($theme['button-bg'] ?? '#a855f7') . ";\n";
+    $css .= "--button-text:" . ($theme['button-text'] ?? '#ffffff') . ";\n";
+    $css .= "--font-family:" . ($theme['font-family'] ?? 'system-ui, sans-serif') . ";\n";
+    $css .= "--header-height:" . css_px($theme['header-height'] ?? '74', 74) . ";\n";
+    $css .= "--logo-height:" . css_px($theme['logo-height'] ?? '100', 100) . ";\n";
+    $css .= "--content-width:" . css_px($theme['content-width'] ?? '1240', 1240) . ";\n";
+    $css .= "--radius:" . css_px($theme['border-radius'] ?? '10', 10) . ";\n";
+    $css .= "--header-shadow:" . $shadow . ";\n";
+    $css .= "--menu-position:" . $menu_position . ";\n";
+    $css .= "--spidercms-logo-max-height:min(var(--logo-height,100px), calc(var(--header-height,74px) - 14px));\n";
+    $css .= "}\n";
+    $css .= "body{background:var(--page-bg)!important;color:var(--page-text)!important;font-family:var(--font-family)!important;}\n";
+    $css .= "a{color:var(--link-color);}\n";
+    $css .= ".site-header{background:var(--header-bg)!important;color:var(--header-text)!important;box-shadow:var(--header-shadow)!important;}\n";
+    $css .= ".site-header a,.nav-menu a{color:var(--header-text)!important;}\n";
+    $css .= ".site-footer{background:var(--footer-bg)!important;color:var(--footer-text)!important;}\n";
+    $css .= ".footer-bottom,.footer-col a{color:var(--footer-muted)!important;}\n";
+    $css .= ".cms-btn,button[type=submit]{background:var(--button-bg);color:var(--button-text);}\n";
+    $css .= "main{max-width:var(--content-width,1240px);margin-left:auto!important;margin-right:auto!important;}\n";
+    $css .= ".logo img{max-height:var(--spidercms-logo-max-height)!important;width:auto!important;object-fit:contain!important;}\n";
+    $css .= ".site-header.menu-left .header-container{justify-content:flex-start!important;gap:2rem;}\n";
+    $css .= ".site-header.menu-center .header-container{justify-content:center!important;gap:2rem;}\n";
+    $css .= ".site-header.menu-right .header-container{justify-content:space-between!important;}\n";
+    $css .= "</style>";
+
+    foreach ($files as $file) {
+        if (!is_file($file) || basename($file) === 'admin.php') continue;
+        $content = file_get_contents($file);
+        $original = $content;
+        $content = preg_replace('~<style\s+id=["\']spidercms-theme-preset-fix["\'][^>]*>.*?</style>\s*~is', '', $content);
+        if (stripos($content, '</head>') !== false) {
+            $content = str_ireplace('</head>', $css . "\n</head>", $content);
+        } elseif (stripos($content, '<body') !== false) {
+            $content = preg_replace('~(<body\b[^>]*>)~i', "$1\n" . $css, $content, 1);
+        }
+        if ($content !== $original) {
+            file_put_contents($file, $content);
+            $updated++;
+        }
+    }
+    if (function_exists('spidercms_sync_theme_css_link_in_pages')) {
+        $updated += spidercms_sync_theme_css_link_in_pages();
+    }
+    return $updated;
+}
+
+
+// ----------------------------------------------------------------------
+// GLOBALNY CSS MOTYWU – mocniejsza poprawka presetów
+// Presety zapisują .theme.json, ale starsze strony mają często własny CSS.
+// Ten moduł generuje /assets/spidercms-theme.css i podpina go do stron
+// jako końcowy arkusz stylów z !important.
+// ----------------------------------------------------------------------
+function spidercms_theme_public_base_url() {
+    $base = defined('BASE_URL') ? trim((string)BASE_URL) : '';
+    if ($base === '') return '';
+    return rtrim($base, '/');
+}
+
+function spidercms_theme_css_string($theme_data = null) {
+    global $theme;
+    $t = is_array($theme_data) ? $theme_data : (is_array($theme) ? $theme : []);
+
+    $primary       = $t['primary'] ?? '#a855f7';
+    $primary_dark  = $t['primary-dark'] ?? '#7e22ce';
+    $accent        = $t['accent'] ?? '#2563eb';
+    $page_bg       = $t['page-bg'] ?? '#f9fafb';
+    $page_text     = $t['page-text'] ?? '#111827';
+    $header_bg     = $t['header-bg'] ?? '#ffffff';
+    $header_text   = $t['header-text'] ?? '#374151';
+    $footer_bg     = $t['footer-bg'] ?? '#1f2937';
+    $footer_text   = $t['footer-text'] ?? '#f3f4f6';
+    $footer_muted  = $t['footer-muted'] ?? '#9ca3af';
+    $link_color    = $t['link-color'] ?? $primary;
+    $button_bg     = $t['button-bg'] ?? $primary;
+    $button_text   = $t['button-text'] ?? '#ffffff';
+    $font_family   = $t['font-family'] ?? 'system-ui, sans-serif';
+    $header_height = css_px($t['header-height'] ?? '74', 74);
+    $logo_height   = css_px($t['logo-height'] ?? '100', 100);
+    $content_width = css_px($t['content-width'] ?? '1240', 1240);
+    $radius        = css_px($t['border-radius'] ?? '10', 10);
+    $shadow        = !empty($t['shadow-enabled']) ? '0 2px 10px rgba(0,0,0,0.08)' : 'none';
+    $menu_position = $t['menu-position'] ?? 'right';
+    if (!in_array($menu_position, ['left','center','right'], true)) $menu_position = 'right';
+
+    return <<<CSS
+/* SpiderCMS global theme override - generated automatically */
+:root{
+  --primary: {$primary}!important;
+  --primary-dark: {$primary_dark}!important;
+  --accent: {$accent}!important;
+  --page-bg: {$page_bg}!important;
+  --page-text: {$page_text}!important;
+  --header-bg: {$header_bg}!important;
+  --header-text: {$header_text}!important;
+  --footer-bg: {$footer_bg}!important;
+  --footer-text: {$footer_text}!important;
+  --footer-muted: {$footer_muted}!important;
+  --link-color: {$link_color}!important;
+  --button-bg: {$button_bg}!important;
+  --button-text: {$button_text}!important;
+  --font-family: {$font_family}!important;
+  --header-height: {$header_height}!important;
+  --logo-height: {$logo_height}!important;
+  --content-width: {$content_width}!important;
+  --radius: {$radius}!important;
+  --header-shadow: {$shadow}!important;
+  --menu-position: {$menu_position}!important;
+  --spidercms-logo-max-height: min(var(--logo-height,100px), calc(var(--header-height,74px) - 14px))!important;
+}
+html,body{
+  background:var(--page-bg)!important;
+  color:var(--page-text)!important;
+  font-family:var(--font-family)!important;
+}
+body *{font-family:inherit;}
+a{color:var(--link-color)!important;}
+main,.page-content,.content,.container-main{
+  max-width:var(--content-width,1240px)!important;
+  margin-left:auto!important;
+  margin-right:auto!important;
+}
+.site-header{
+  background:var(--header-bg)!important;
+  background-color:var(--header-bg)!important;
+  color:var(--header-text)!important;
+  box-shadow:var(--header-shadow)!important;
+  min-height:var(--header-height)!important;
+  opacity:1!important;
+  backdrop-filter:none!important;
+  -webkit-backdrop-filter:none!important;
+}
+.site-header *,.site-header a,.nav-menu a,.submenu a{color:var(--header-text)!important;}
+.site-header .header-container{min-height:var(--header-height)!important;}
+.logo img,.brand-logo,.site-logo img{
+  max-height:var(--spidercms-logo-max-height)!important;
+  width:auto!important;
+  object-fit:contain!important;
+}
+.site-header.menu-left .header-container{justify-content:flex-start!important;gap:2rem!important;}
+.site-header.menu-center .header-container{justify-content:center!important;gap:2rem!important;}
+.site-header.menu-right .header-container{justify-content:space-between!important;}
+.site-footer,footer.site-footer{
+  background:var(--footer-bg)!important;
+  color:var(--footer-text)!important;
+}
+.site-footer *{color:inherit;}
+.footer-bottom,.footer-col a,.site-footer a,.site-footer .muted{color:var(--footer-muted)!important;}
+.cms-btn,.btn-primary,.button-primary,a.cms-btn,button[type=submit]:not(.no-theme),input[type=submit]{
+  background:var(--button-bg)!important;
+  background-color:var(--button-bg)!important;
+  color:var(--button-text)!important;
+  border-color:var(--button-bg)!important;
+}
+.cms-card,.card,.cms-faq details{
+  border-radius:var(--radius)!important;
+}
+.cms-hero{
+  max-width:var(--content-width,1240px)!important;
+  border-radius:calc(var(--radius,10px) + 8px)!important;
+}
+CSS;
+}
+
+function spidercms_write_theme_css_file() {
+    global $theme;
+    $assets_dir = __DIR__ . '/assets';
+    if (!is_dir($assets_dir)) @mkdir($assets_dir, 0755, true);
+    $css = spidercms_theme_css_string($theme);
+    return @file_put_contents($assets_dir . '/spidercms-theme.css', $css) !== false;
+}
+
+function spidercms_theme_link_block($depth = 1) {
+    $depth = (int)$depth;
+    return "<?php\n" .
+        "\$spidercms_theme_root = dirname(__DIR__, {$depth});\n" .
+        "\$spidercms_theme_css = \$spidercms_theme_root . '/assets/spidercms-theme.css';\n" .
+        "\$spidercms_theme_v = file_exists(\$spidercms_theme_css) ? filemtime(\$spidercms_theme_css) : time();\n" .
+        "\$spidercms_theme_href = (defined('BASE_URL') ? rtrim((string)BASE_URL, '/') : '') . '/assets/spidercms-theme.css?v=' . \$spidercms_theme_v;\n" .
+        "?>\n" .
+        "<link id=\"spidercms-global-theme-css\" rel=\"stylesheet\" href=\"<?= htmlspecialchars(\$spidercms_theme_href, ENT_QUOTES, 'UTF-8') ?>\">";
+}
+
+function spidercms_sync_theme_css_link_in_pages() {
+    $updated = 0;
+    $files = [];
+
+    foreach (spidercms_available_page_folders() as $folder) {
+        $dir = spidercms_page_folder_dir($folder);
+        foreach (glob($dir . '/*.php') ?: [] as $file) $files[] = $file;
+    }
+    if (defined('ACTIVE_PAGES_DIR')) {
+        foreach (glob(ACTIVE_PAGES_DIR . '/*.php') ?: [] as $file) $files[] = $file;
+    }
+    $root_index = __DIR__ . '/index.php';
+    if (is_file($root_index)) $files[] = $root_index;
+
+    $files = array_values(array_unique($files));
+
+    foreach ($files as $file) {
+        if (!is_file($file) || basename($file) === 'admin.php') continue;
+        $content = file_get_contents($file);
+        $original = $content;
+
+        // Usuń stare wersje linku/stylu, żeby zawsze była jedna aktualna wersja.
+        $content = preg_replace('~<link\s+id=["\']spidercms-global-theme-css["\'][^>]*>\s*~is', '', $content);
+        $content = preg_replace('~<style\s+id=["\']spidercms-theme-preset-fix["\'][^>]*>.*?</style>\s*~is', '', $content);
+
+        $rel = str_replace('\\', '/', substr(dirname($file), strlen(__DIR__)));
+        $rel = trim($rel, '/');
+        $depth = $rel === '' ? 0 : substr_count($rel, '/') + 1;
+        if ($depth < 1) $depth = 1;
+        $link = spidercms_theme_link_block($depth);
+
+        if (stripos($content, '</head>') !== false) {
+            $content = str_ireplace('</head>', $link . "\n</head>", $content);
+        } elseif (stripos($content, '<body') !== false) {
+            $content = preg_replace('~(<body\b[^>]*>)~i', $link . "\n$1", $content, 1);
+        }
+
+        if ($content !== $original) {
+            file_put_contents($file, $content);
+            $updated++;
+        }
+    }
+    return $updated;
+}
+
+function spidercms_force_theme_refresh() {
+    spidercms_write_theme_css_file();
+    spidercms_sync_theme_css_link_in_pages();
+    spidercms_apply_theme_css_to_all_pages();
 }
 
 
@@ -1273,7 +2676,8 @@ CSS;
 }
 
 // Automatyczna, lekka naprawa przy wejściu do panelu – działa tylko na plikach stron.
-spidercms_fix_opaque_header_in_pages();
+// Wyłączone: ta funkcja modyfikowała publiczne strony przy każdym odświeżeniu panelu.
+// spidercms_fix_opaque_header_in_pages();
 
 
 // ----------------------------------------------------------------------
@@ -1332,6 +2736,141 @@ function spidercms_repair_pages_after_header_body_move() {
 
 spidercms_repair_pages_after_header_body_move();
 
+
+// ----------------------------------------------------------------------
+// Globalna szerokość treści strony
+// Dodaje/odświeża końcowy CSS w istniejących stronach, aby ustawienie
+// --content-width działało także na stronach utworzonych wcześniej.
+// ----------------------------------------------------------------------
+function spidercms_sync_content_width_in_pages() {
+    $updated = 0;
+    $files = [];
+
+    if (defined('ACTIVE_PAGES_DIR')) {
+        foreach (glob(ACTIVE_PAGES_DIR . '/*.php') ?: [] as $file) {
+            $files[] = $file;
+        }
+    }
+
+    foreach (spidercms_available_page_folders() as $folder) {
+        $dir = spidercms_page_folder_dir($folder);
+        foreach (glob($dir . '/*.php') ?: [] as $file) {
+            $files[] = $file;
+        }
+    }
+
+    $root_index = __DIR__ . '/index.php';
+    if (is_file($root_index)) {
+        $files[] = $root_index;
+    }
+
+    $files = array_values(array_unique($files));
+
+    $fix_css = <<<'CSS'
+<style id="spidercms-content-width-fix">
+main{
+    width:100%;
+    max-width:var(--content-width,1240px);
+    margin-left:auto!important;
+    margin-right:auto!important;
+}
+@media(max-width:768px){
+    main{
+        max-width:100%;
+    }
+}
+</style>
+CSS;
+
+    foreach ($files as $file) {
+        if (!is_file($file) || basename($file) === 'admin.php') {
+            continue;
+        }
+
+        $content = file_get_contents($file);
+        $original = $content;
+
+        $content = preg_replace('~<style\s+id=["\']spidercms-content-width-fix["\'][^>]*>.*?</style>\s*~is', '', $content);
+
+        if (stripos($content, '</head>') !== false) {
+            $content = str_ireplace('</head>', $fix_css . "\n</head>", $content);
+        }
+
+        if ($content !== $original) {
+            file_put_contents($file, $content);
+            $updated++;
+        }
+    }
+
+    return $updated;
+}
+
+// Automatycznie utrzymuj wspólną szerokość treści na istniejących stronach.
+// Wyłączone: nie modyfikujemy stron przy samym wejściu do panelu.
+// spidercms_sync_content_width_in_pages();
+
+
+// ----------------------------------------------------------------------
+// NAPRAWA ŚMIECI NA POCZĄTKU WYGENEROWANYCH STRON
+// Usuwa przypadkowo zapisane znaki typu >>>>>> albo " > " > przed <?php / <!DOCTYPE / <html.
+// To naprawia strony uszkodzone przez wcześniejszą błędną wersję generatora.
+// ----------------------------------------------------------------------
+// JEDNORAZOWA NAPRAWA ŚMIECI TYPU >>>>>> W PUBLICZNYCH STRONACH
+// Ta funkcja TYLKO CZYŚCI istniejące pliki. Niczego nie dopisuje.
+// Usuwa linie składające się wyłącznie z >, ", spacji i encji &gt;,
+// które mogły zostać zapisane przez wcześniejszą uszkodzoną wersję generatora.
+// ----------------------------------------------------------------------
+function spidercms_cleanup_leading_garbage_in_public_pages() {
+    $updated = 0;
+    $files = [];
+
+    $root_index = __DIR__ . '/index.php';
+    if (is_file($root_index)) $files[] = $root_index;
+
+    if (defined('ACTIVE_PAGES_DIR')) {
+        foreach (glob(ACTIVE_PAGES_DIR . '/*.php') ?: [] as $file) $files[] = $file;
+    }
+
+    if (function_exists('spidercms_available_page_folders')) {
+        foreach (spidercms_available_page_folders() as $folder) {
+            $dir = spidercms_page_folder_dir($folder);
+            foreach (glob($dir . '/*.php') ?: [] as $file) $files[] = $file;
+        }
+    }
+
+    $files = array_values(array_unique($files));
+
+    foreach ($files as $file) {
+        if (!is_file($file) || basename($file) === 'admin.php') continue;
+
+        $content = file_get_contents($file);
+        $original = $content;
+
+        // 1) Usuń śmieci z samego początku pliku.
+        $content = preg_replace('~\\A(?:\\s*(?:>|"|&gt;|&quot;))+\\s*~i', '', $content);
+
+        // 2) Usuń osobne linie składające się tylko ze śmieci.
+        $content = preg_replace('~^[\\s]*(?:>|"|&gt;|&quot;|;)+[\\s]*$~mi', '', $content);
+
+        // 3) Usuń długie ciągi śmieci w pierwszych 3000 znakach pliku.
+        $head = substr($content, 0, 3000);
+        $tail = substr($content, 3000);
+        $head = preg_replace('~(?:\\s*(?:>|"|&gt;|&quot;)){8,}\\s*~i', '', $head);
+        $content = $head . $tail;
+
+        if ($content !== $original) {
+            file_put_contents($file, $content, LOCK_EX);
+            $updated++;
+        }
+    }
+
+    return $updated;
+}
+
+// Czyścimy raz przy wejściu do panelu. Funkcja nie dopisuje kodu do stron.
+spidercms_cleanup_leading_garbage_in_public_pages();
+
+
 // ----------------------------------------------------------------------
 // Funkcja zapisująca przekierowanie strony głównej
 // ----------------------------------------------------------------------
@@ -1378,6 +2917,17 @@ if (!defined('SITE_NAME')) {
 $settings_file = __DIR__ . '/.settings.json';
 $settings = file_exists($settings_file) ? json_decode((string)file_get_contents($settings_file), true) : [];
 if (!is_array($settings)) $settings = [];
+if (!array_key_exists('show_site_name_in_header', $settings)) $settings['show_site_name_in_header'] = '0';
+if (!array_key_exists('header_title_font_size', $settings)) $settings['header_title_font_size'] = '22';
+if (!array_key_exists('header_title_font_weight', $settings)) $settings['header_title_font_weight'] = '800';
+if (!array_key_exists('header_title_color', $settings)) $settings['header_title_color'] = '';
+if (!array_key_exists('header_title_gap', $settings)) $settings['header_title_gap'] = '10';
+if (!array_key_exists('header_title_uppercase', $settings)) $settings['header_title_uppercase'] = '0';
+if (!array_key_exists('header_title_italic', $settings)) $settings['header_title_italic'] = '0';
+if (!array_key_exists('header_title_shadow', $settings)) $settings['header_title_shadow'] = '0';
+if (!array_key_exists('header_title_bg', $settings)) $settings['header_title_bg'] = '';
+if (!array_key_exists('header_title_radius', $settings)) $settings['header_title_radius'] = '0';
+$show_site_name_in_header = (string)($settings['show_site_name_in_header'] ?? '0') === '1';
 
 if (!function_exists('spidercms_header_public_url')) {
     function spidercms_header_public_url($url) {
@@ -1417,17 +2967,55 @@ if (!function_exists('spidercms_header_icon_html')) {
         return '<i class="' . htmlspecialchars($icon, ENT_QUOTES, 'UTF-8') . '"></i>';
     }
 }
+$header_title_font_size = preg_replace('/[^0-9.]/', '', (string)($settings['header_title_font_size'] ?? '22'));
+if ($header_title_font_size === '') $header_title_font_size = '22';
+$header_title_font_weight = preg_replace('/[^0-9]/', '', (string)($settings['header_title_font_weight'] ?? '800'));
+if ($header_title_font_weight === '') $header_title_font_weight = '800';
+$header_title_gap = preg_replace('/[^0-9.]/', '', (string)($settings['header_title_gap'] ?? '10'));
+if ($header_title_gap === '') $header_title_gap = '10';
+$header_title_radius = preg_replace('/[^0-9.]/', '', (string)($settings['header_title_radius'] ?? '0'));
+if ($header_title_radius === '') $header_title_radius = '0';
+$header_title_color_raw = trim((string)($settings['header_title_color'] ?? ''));
+$header_title_color = $header_title_color_raw !== '' ? preg_replace('/[^#a-zA-Z0-9(),.%\s-]/', '', $header_title_color_raw) : 'var(--header-text,#374151)';
+$header_title_bg_raw = trim((string)($settings['header_title_bg'] ?? ''));
+$header_title_bg = $header_title_bg_raw !== '' ? preg_replace('/[^#a-zA-Z0-9(),.%\s-]/', '', $header_title_bg_raw) : 'transparent';
+$header_title_transform = ((string)($settings['header_title_uppercase'] ?? '0') === '1') ? 'uppercase' : 'none';
+$header_title_style = ((string)($settings['header_title_italic'] ?? '0') === '1') ? 'italic' : 'normal';
+$header_title_shadow = ((string)($settings['header_title_shadow'] ?? '0') === '1') ? '0 2px 10px rgba(0,0,0,.25)' : 'none';
 ?>
+<?php
+$spidercms_theme_css_file = __DIR__ . '/assets/spidercms-theme.css';
+$spidercms_theme_css_v = file_exists($spidercms_theme_css_file) ? filemtime($spidercms_theme_css_file) : time();
+$spidercms_theme_css_href = (defined('BASE_URL') ? rtrim((string)BASE_URL, '/') : '') . '/assets/spidercms-theme.css?v=' . $spidercms_theme_css_v;
+?>
+<link id="spidercms-global-theme-css" rel="stylesheet" href="<?= htmlspecialchars($spidercms_theme_css_href, ENT_QUOTES, 'UTF-8') ?>">
 <style id="spidercms-submenu-style">
-.nav-item{position:relative;display:flex;align-items:center}.nav-item>a{white-space:nowrap}.nav-item.has-submenu>a::after{content:"▾";font-size:.72em;margin-left:.35rem;opacity:.75}.submenu{display:none;position:absolute;left:0;top:100%;min-width:220px;background:var(--header-bg,#fff);box-shadow:0 14px 35px rgba(0,0,0,.16);border:1px solid rgba(0,0,0,.08);border-radius:12px;padding:.45rem;z-index:1005}.nav-item.has-submenu:hover>.submenu,.nav-item.has-submenu:focus-within>.submenu{display:flex;flex-direction:column;gap:.15rem}.submenu a{display:flex;align-items:center;gap:.5rem;padding:.65rem .8rem;border-radius:10px;color:var(--header-text,#374151);text-decoration:none;white-space:nowrap}.submenu a:hover{background:rgba(168,85,247,.10);color:var(--primary,#a855f7)}@media(max-width:768px){.nav-item{width:100%;display:block}.submenu{position:static;display:flex;flex-direction:column;box-shadow:none;border:0;background:rgba(0,0,0,.03);margin:.2rem 0 .4rem 1rem;min-width:0}.submenu a{white-space:normal}}
+.nav-item{position:relative;display:flex;align-items:center}.nav-item>a{white-space:nowrap}.nav-item.has-submenu>a::after{content:"▾";font-size:.72em;margin-left:.35rem;opacity:.75}.submenu{display:none;position:absolute;left:0;top:100%;min-width:220px;background:var(--header-bg,#fff);box-shadow:0 14px 35px rgba(0,0,0,.16);border:1px solid rgba(0,0,0,.08);border-radius:12px;padding:.45rem;z-index:1005}.nav-item.has-submenu:hover>.submenu,.nav-item.has-submenu:focus-within>.submenu{display:flex;flex-direction:column;gap:.15rem}.submenu a{display:flex;align-items:center;gap:.5rem;padding:.65rem .8rem;border-radius:10px;color:var(--header-text,#374151);text-decoration:none;white-space:nowrap}.submenu a:hover{background:rgba(168,85,247,.10);color:var(--primary,#a855f7)}.logo{gap:.65rem}.header-site-name{display:inline-block;color:var(--header-text,#374151);font-weight:800;font-size:clamp(1rem,1.8vw,1.35rem);line-height:1.1;white-space:nowrap}.logo img + .header-site-name{margin-left:.1rem}@media(max-width:768px){.nav-item{width:100%;display:block}.submenu{position:static;display:flex;flex-direction:column;box-shadow:none;border:0;background:rgba(0,0,0,.03);margin:.2rem 0 .4rem 1rem;min-width:0}.submenu a{white-space:normal}.header-site-name{font-size:1rem;max-width:52vw;overflow:hidden;text-overflow:ellipsis}}
+</style>
+<style id="spidercms-header-title-style">
+.logo{gap:<?= htmlspecialchars($header_title_gap, ENT_QUOTES, 'UTF-8') ?>px!important;}
+.header-site-name{
+    color:<?= htmlspecialchars($header_title_color, ENT_QUOTES, 'UTF-8') ?>!important;
+    font-size:<?= htmlspecialchars($header_title_font_size, ENT_QUOTES, 'UTF-8') ?>px!important;
+    font-weight:<?= htmlspecialchars($header_title_font_weight, ENT_QUOTES, 'UTF-8') ?>!important;
+    text-transform:<?= htmlspecialchars($header_title_transform, ENT_QUOTES, 'UTF-8') ?>!important;
+    font-style:<?= htmlspecialchars($header_title_style, ENT_QUOTES, 'UTF-8') ?>!important;
+    text-shadow:<?= htmlspecialchars($header_title_shadow, ENT_QUOTES, 'UTF-8') ?>!important;
+    background:<?= htmlspecialchars($header_title_bg, ENT_QUOTES, 'UTF-8') ?>!important;
+    border-radius:<?= htmlspecialchars($header_title_radius, ENT_QUOTES, 'UTF-8') ?>px!important;
+    padding:<?= $header_title_bg !== 'transparent' ? '0.18em 0.42em' : '0' ?>!important;
+}
+@media(max-width:768px){.header-site-name{font-size:min(<?= htmlspecialchars($header_title_font_size, ENT_QUOTES, 'UTF-8') ?>px,1rem)!important;}}
 </style>
 <header class="site-header menu-<?= htmlspecialchars($menu_position, ENT_QUOTES, 'UTF-8') ?>">
     <div class="header-container">
         <a href="<?= htmlspecialchars((defined('BASE_URL') ? BASE_URL : '') ?: '/', ENT_QUOTES, 'UTF-8') ?>" class="logo">
             <?php if (!empty($logo_url)): ?>
                 <img src="<?= htmlspecialchars($logo_url, ENT_QUOTES, 'UTF-8') ?>" alt="<?= htmlspecialchars(defined('SITE_NAME') ? SITE_NAME : 'Logo', ENT_QUOTES, 'UTF-8') ?>">
-            <?php else: ?>
-                <?= htmlspecialchars(defined('SITE_NAME') ? SITE_NAME : 'SpiderCMS', ENT_QUOTES, 'UTF-8') ?>
+            <?php endif; ?>
+
+            <?php if ($show_site_name_in_header || empty($logo_url)): ?>
+                <span class="header-site-name"><?= htmlspecialchars(defined('SITE_NAME') ? SITE_NAME : 'SpiderCMS', ENT_QUOTES, 'UTF-8') ?></span>
             <?php endif; ?>
         </a>
 
@@ -1472,6 +3060,9 @@ PHP;
 // Automatycznie odśwież header.php po wejściu do panelu, żeby naprawić ścieżki logo
 // bez potrzeby ponownego zapisywania ustawień.
 spidercms_write_header_with_submenu_support();
+spidercms_write_theme_css_file();
+// Wyłączone: nie dopisujemy linków CSS przy każdym wejściu do panelu.
+// spidercms_sync_theme_css_link_in_pages();
 
 // ----------------------------------------------------------------------
 // Hasło + brute-force
@@ -1500,6 +3091,588 @@ if ($_SESSION['login_block_until'] > time()) {
 
 
 // ----------------------------------------------------------------------
+// SPIDERCMS LIVE EDITOR START
+// Opcjonalny edytor strony na żywo.
+// Działa jako tryb panelu admin.php?action=live_editor&file=nazwa.php.
+// Zapisuje zawartość <main> lub zmienną $content = <<<HTML ... HTML;
+// Tworzy kopię zapasową przed zapisem.
+// ----------------------------------------------------------------------
+
+$live_settings_file = __DIR__ . '/.live_editor.json';
+$live_settings_defaults = [
+    'enabled' => '1',
+    'backup_enabled' => '1',
+    'editable_selector' => 'main',
+];
+
+$live_settings_loaded = file_exists($live_settings_file) ? json_decode((string)file_get_contents($live_settings_file), true) : [];
+if (!is_array($live_settings_loaded)) {
+    $live_settings_loaded = [];
+}
+$live_settings = array_merge($live_settings_defaults, $live_settings_loaded);
+
+function spidercms_live_is_enabled() {
+    global $live_settings;
+    return (($live_settings['enabled'] ?? '1') === '1');
+}
+
+function spidercms_live_safe_file($file) {
+    $file = basename((string)$file);
+    if ($file === '' || !preg_match('/^[a-zA-Z0-9_\-]+\.php$/', $file)) {
+        return '';
+    }
+    return $file;
+}
+
+function spidercms_live_page_path($file) {
+    $file = spidercms_live_safe_file($file);
+    if ($file === '') {
+        return '';
+    }
+
+    if (defined('ACTIVE_PAGES_DIR')) {
+        $path = ACTIVE_PAGES_DIR . '/' . $file;
+        if (is_file($path)) {
+            return $path;
+        }
+    }
+
+    $fallback = __DIR__ . '/pages/' . $file;
+    if (is_file($fallback)) {
+        return $fallback;
+    }
+
+    $root = __DIR__ . '/' . $file;
+    if (is_file($root) && $file === 'index.php') {
+        return $root;
+    }
+
+    return '';
+}
+
+function spidercms_live_page_url($file) {
+    $file = spidercms_live_safe_file($file);
+    if ($file === '') {
+        return '';
+    }
+
+    if (defined('ACTIVE_PAGES_URL')) {
+        return rtrim(ACTIVE_PAGES_URL, '/') . '/' . rawurlencode($file);
+    }
+
+    return 'pages/' . rawurlencode($file);
+}
+
+function spidercms_live_extract_title($source, $fallback = 'Strona') {
+    if (preg_match('/\$title\s*=\s*[\'"](.+?)[\'"]\s*;/s', $source, $m)) {
+        return html_entity_decode($m[1], ENT_QUOTES, 'UTF-8');
+    }
+    if (preg_match('/\$page_title\s*=\s*[\'"](.+?)[\'"]\s*;/s', $source, $m)) {
+        return html_entity_decode($m[1], ENT_QUOTES, 'UTF-8');
+    }
+    if (preg_match('/<title[^>]*>(.*?)<\/title>/is', $source, $m)) {
+        return trim(strip_tags($m[1]));
+    }
+    return $fallback;
+}
+
+function spidercms_live_extract_content($source) {
+    if (preg_match('/\$content\s*=\s*<<<HTML\s*(.*?)\s*HTML;/s', $source, $m)) {
+        return $m[1];
+    }
+
+    if (preg_match('/<main\b[^>]*>(.*?)<\/main>/is', $source, $m)) {
+        return $m[1];
+    }
+
+    return '';
+}
+
+function spidercms_live_create_backup($path) {
+    $backup_dir = __DIR__ . '/.backups/live-editor';
+    if (!is_dir($backup_dir)) {
+        @mkdir($backup_dir, 0750, true);
+    }
+
+    $name = basename($path, '.php') . '-' . date('Ymd-His') . '.php.bak';
+    return @copy($path, $backup_dir . '/' . $name);
+}
+
+function spidercms_live_sanitize_html($html) {
+    $html = (string)$html;
+
+    // Usuwamy elementy i atrybuty szczególnie ryzykowne.
+    $html = preg_replace('~<\s*(script|iframe|object|embed|form|input|button|textarea|select|option|link|meta|base)[^>]*>.*?<\s*/\s*\1\s*>~is', '', $html);
+    $html = preg_replace('~<\s*(script|iframe|object|embed|form|input|button|textarea|select|option|link|meta|base)[^>]*\/?\s*>~is', '', $html);
+    $html = preg_replace('/\son[a-z]+\s*=\s*(".*?"|\'.*?\'|[^\s>]+)/is', '', $html);
+    $html = preg_replace('/javascript\s*:/is', '', $html);
+
+    return trim($html);
+}
+
+function spidercms_live_save_content_to_page($path, $new_content) {
+    $source = (string)file_get_contents($path);
+    $new_content = spidercms_live_sanitize_html($new_content);
+
+    if (($GLOBALS['live_settings']['backup_enabled'] ?? '1') === '1') {
+        spidercms_live_create_backup($path);
+    }
+
+    if (preg_match('/\$content\s*=\s*<<<HTML\s*(.*?)\s*HTML;/s', $source)) {
+        $updated = preg_replace(
+            '/\$content\s*=\s*<<<HTML\s*(.*?)\s*HTML;/s',
+            '$content = <<<HTML' . "\n" . $new_content . "\n" . 'HTML;',
+            $source,
+            1
+        );
+    } elseif (preg_match('/<main\b[^>]*>.*?<\/main>/is', $source)) {
+        $updated = preg_replace(
+            '/(<main\b[^>]*>).*?(<\/main>)/is',
+            '$1' . "\n" . $new_content . "\n" . '$2',
+            $source,
+            1
+        );
+    } else {
+        return false;
+    }
+
+    return file_put_contents($path, $updated, LOCK_EX) !== false;
+}
+
+// Endpoint zapisu LIVE.
+if (($_POST['action'] ?? '') === 'live_editor_save') {
+    if (!isset($_SESSION['logged_in']) || $_SESSION['logged_in'] !== true) {
+        http_response_code(403);
+        header('Content-Type: application/json; charset=utf-8');
+        echo json_encode(['ok' => false, 'error' => 'Brak autoryzacji.']);
+        exit;
+    }
+
+    verify_csrf_or_die();
+
+    if (!spidercms_live_is_enabled()) {
+        http_response_code(403);
+        header('Content-Type: application/json; charset=utf-8');
+        echo json_encode(['ok' => false, 'error' => 'Edytor LIVE jest wyłączony.']);
+        exit;
+    }
+
+    $file = spidercms_live_safe_file($_POST['file'] ?? '');
+    $path = spidercms_live_page_path($file);
+
+    if ($path === '') {
+        http_response_code(404);
+        header('Content-Type: application/json; charset=utf-8');
+        echo json_encode(['ok' => false, 'error' => 'Nie znaleziono strony.']);
+        exit;
+    }
+
+    $html = $_POST['html'] ?? '';
+    $ok = spidercms_live_save_content_to_page($path, $html);
+
+    if (function_exists('spidercms_admin_log')) {
+        spidercms_admin_log($ok ? 'live_editor_save' : 'live_editor_save_failed', [
+            'file' => $file
+        ]);
+    }
+
+    header('Content-Type: application/json; charset=utf-8');
+    echo json_encode([
+        'ok' => $ok,
+        'message' => $ok ? 'Zapisano zmiany LIVE.' : 'Nie udało się zapisać zmian.'
+    ], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
+// Panel edytora LIVE.
+if (($_GET['action'] ?? '') === 'live_editor') {
+    if (!isset($_SESSION['logged_in']) || $_SESSION['logged_in'] !== true) {
+        header('Location: admin.php');
+        exit;
+    }
+
+    $file = spidercms_live_safe_file($_GET['file'] ?? '');
+    $path = spidercms_live_page_path($file);
+
+    if ($path === '') {
+        http_response_code(404);
+        echo 'Nie znaleziono strony do edycji LIVE.';
+        exit;
+    }
+
+    if (!spidercms_live_is_enabled()) {
+        echo 'Edytor LIVE jest wyłączony w ustawieniach.';
+        exit;
+    }
+
+    $source = (string)file_get_contents($path);
+    $title = spidercms_live_extract_title($source, $file);
+    $content = spidercms_live_extract_content($source);
+    $preview_url = spidercms_live_page_url($file);
+    $token = csrf_token();
+
+    $live_media = [];
+    $live_uploads_dir = __DIR__ . '/uploads';
+    if (is_dir($live_uploads_dir)) {
+        foreach (glob($live_uploads_dir . '/*') ?: [] as $img) {
+            if (is_file($img) && preg_match('/\.(jpe?g|png|gif|webp|svg)$/i', $img)) {
+                $live_media[] = 'uploads/' . basename($img);
+            }
+        }
+    }
+
+    ?>
+    <!DOCTYPE html>
+    <html lang="pl">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Edytor LIVE – <?= e($title) ?></title>
+        <style>
+            *{box-sizing:border-box}
+            body{margin:0;font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#0f172a;color:#f8fafc}
+            .live-shell{min-height:100vh;display:flex;flex-direction:column}
+            .live-topbar{position:sticky;top:0;z-index:50;background:linear-gradient(135deg,#0f172a,#1e293b);border-bottom:1px solid rgba(255,255,255,.12);padding:.8rem 1rem;display:flex;gap:.75rem;align-items:center;justify-content:space-between;box-shadow:0 12px 30px rgba(0,0,0,.25)}
+            .live-title{font-weight:900;display:flex;flex-direction:column;gap:.15rem}
+            .live-title small{color:#94a3b8;font-weight:600}
+            .live-actions{display:flex;flex-wrap:wrap;gap:.5rem;align-items:center}
+            .live-btn{border:0;border-radius:999px;padding:.72rem 1rem;font-weight:850;cursor:pointer;text-decoration:none;display:inline-flex;align-items:center;gap:.45rem}
+            .live-btn.primary{background:#a855f7;color:#fff}
+            .live-btn.dark{background:#334155;color:#fff}
+            .live-btn.light{background:#e2e8f0;color:#0f172a}
+            .live-btn.danger{background:#ef4444;color:#fff}
+            .live-work{display:grid;grid-template-columns:280px 1fr;min-height:calc(100vh - 72px)}
+            .live-panel{background:#111827;border-right:1px solid rgba(255,255,255,.1);padding:1rem;overflow:auto}
+            .live-panel h3{margin:.2rem 0 1rem;font-size:1rem}
+            .live-panel p{color:#cbd5e1;font-size:.92rem;line-height:1.5}
+            .live-hint{padding:.85rem;border-radius:14px;background:rgba(168,85,247,.14);border:1px solid rgba(168,85,247,.35);margin-bottom:1rem}
+            .live-field{margin-bottom:1rem}
+            .live-field label{display:block;margin-bottom:.35rem;font-weight:800;color:#e2e8f0}
+            .live-field input,.live-field select{width:100%;padding:.75rem;border-radius:12px;border:1px solid #334155;background:#020617;color:#fff}
+            .live-stage{background:#e5e7eb;padding:1rem;overflow:auto}
+            .live-canvas{max-width:1240px;margin:0 auto;background:#fff;color:#111827;min-height:70vh;border-radius:18px;box-shadow:0 18px 60px rgba(0,0,0,.25);overflow:hidden}
+            #liveEditable{padding:2rem;outline:0}
+            #liveEditable [contenteditable="false"]{pointer-events:none}
+            #liveEditable:focus{box-shadow:inset 0 0 0 3px #a855f7}
+            .live-selected{outline:3px solid #a855f7!important;outline-offset:3px!important;border-radius:8px}
+            .live-status{font-size:.9rem;color:#cbd5e1}
+            .live-preview-link{color:#93c5fd}
+
+            /* LIVE EXTRA TOOLS */
+            .live-tool-section{margin-top:1rem;padding-top:1rem;border-top:1px solid rgba(255,255,255,.12)}
+            .live-mini-grid{display:grid;grid-template-columns:1fr 1fr;gap:.5rem}
+            .live-mini-btn{border:1px solid rgba(255,255,255,.14);border-radius:12px;background:#020617;color:#e2e8f0;padding:.65rem;font-weight:800;cursor:pointer;text-align:center}
+            .live-mini-btn:hover{background:#1e293b}
+            .live-canvas.is-tablet{max-width:820px}
+            .live-canvas.is-mobile{max-width:390px}
+            .live-canvas.is-mobile #liveEditable{padding:1rem}
+            .live-gallery{display:grid;grid-template-columns:repeat(3,1fr);gap:.45rem;max-height:210px;overflow:auto;padding-right:.2rem}
+            .live-gallery img{width:100%;aspect-ratio:1/1;object-fit:cover;border-radius:10px;border:2px solid transparent;cursor:pointer;background:#fff}
+            .live-gallery img:hover{border-color:#a855f7}
+            .live-modal{display:none;position:fixed;inset:0;z-index:100;background:rgba(2,6,23,.72);align-items:center;justify-content:center;padding:1rem}
+            .live-modal.open{display:flex}
+            .live-modal-box{width:min(560px,100%);background:#111827;border:1px solid rgba(255,255,255,.12);border-radius:20px;padding:1rem;box-shadow:0 30px 90px rgba(0,0,0,.45)}
+            .live-modal-box h3{margin-top:0}
+            .live-modal-actions{display:flex;gap:.5rem;justify-content:flex-end;margin-top:1rem;flex-wrap:wrap}
+
+            @media(max-width:900px){
+                .live-topbar{align-items:flex-start;flex-direction:column}
+                .live-work{grid-template-columns:1fr}
+                .live-panel{border-right:0;border-bottom:1px solid rgba(255,255,255,.1)}
+                #liveEditable{padding:1rem}
+            }
+        </style>
+    </head>
+    <body>
+    <div class="live-shell">
+        <div class="live-topbar">
+            <div class="live-title">
+                <span>✨ Edytor LIVE: <?= e($title) ?></span>
+                <small>Plik: <?= e($file) ?> · <a class="live-preview-link" href="<?= e($preview_url) ?>" target="_blank">Podgląd strony</a></small>
+            </div>
+            <div class="live-actions">
+                <a class="live-btn light" href="admin.php?tab=pages">← Wróć</a>
+                <button class="live-btn dark" type="button" onclick="document.execCommand('bold')">B</button>
+                <button class="live-btn dark" type="button" onclick="document.execCommand('italic')"><i>I</i></button>
+                <button class="live-btn dark" type="button" onclick="document.execCommand('formatBlock', false, 'h2')">H2</button>
+                <button class="live-btn dark" type="button" onclick="document.execCommand('formatBlock', false, 'p')">P</button>
+                <button class="live-btn dark" type="button" id="liveLinkBtn">Link</button>
+                <button class="live-btn dark" type="button" id="liveClearBtn">Wyczyść format</button>
+                <button class="live-btn dark" type="button" id="liveUndoBtn">↶ Cofnij</button>
+                <button class="live-btn dark" type="button" id="liveRedoBtn">↷ Ponów</button>
+                <button class="live-btn dark" type="button" data-device="desktop">Desktop</button>
+                <button class="live-btn dark" type="button" data-device="tablet">Tablet</button>
+                <button class="live-btn dark" type="button" data-device="mobile">Mobile</button>
+                <button class="live-btn primary" type="button" id="liveSaveBtn">Zapisz</button>
+            </div>
+        </div>
+
+        <div class="live-work">
+            <aside class="live-panel">
+                <div class="live-hint">
+                    Kliknij tekst lub element na stronie i edytuj go bezpośrednio. Zapis tworzy kopię zapasową w <strong>.backups/live-editor</strong>.
+                </div>
+
+                <h3>Narzędzia elementu</h3>
+
+                <div class="live-field">
+                    <label>Kolor tekstu</label>
+                    <input type="color" id="liveColor" value="#111827">
+                </div>
+
+                <div class="live-field">
+                    <label>Tło elementu</label>
+                    <input type="color" id="liveBg" value="#ffffff">
+                </div>
+
+                <div class="live-field">
+                    <label>Rozmiar tekstu</label>
+                    <select id="liveFontSize">
+                        <option value="">Bez zmian</option>
+                        <option value="14px">14 px</option>
+                        <option value="16px">16 px</option>
+                        <option value="18px">18 px</option>
+                        <option value="22px">22 px</option>
+                        <option value="28px">28 px</option>
+                        <option value="36px">36 px</option>
+                        <option value="48px">48 px</option>
+                    </select>
+                </div>
+
+                <div class="live-actions">
+                    <button class="live-btn dark" type="button" id="liveApplyStyle">Zastosuj styl</button>
+                    <button class="live-btn danger" type="button" id="liveRemoveElement">Usuń element</button>
+                </div>
+
+                <div class="live-tool-section">
+                    <h3>Gotowe sekcje</h3>
+                    <div class="live-mini-grid">
+                        <button class="live-mini-btn" type="button" data-section="hero">Hero</button>
+                        <button class="live-mini-btn" type="button" data-section="cards">Karty</button>
+                        <button class="live-mini-btn" type="button" data-section="cta">CTA</button>
+                        <button class="live-mini-btn" type="button" data-section="faq">FAQ</button>
+                    </div>
+                </div>
+
+                <div class="live-tool-section">
+                    <h3>Obrazy z galerii</h3>
+                    <p>Kliknij obraz na stronie, potem wybierz zdjęcie.</p>
+                    <div class="live-gallery">
+                        <?php foreach ($live_media as $img): ?>
+                            <img src="<?= e($img) ?>" data-live-img="<?= e($img) ?>" alt="">
+                        <?php endforeach; ?>
+                    </div>
+                </div>
+
+                <p class="live-status" id="liveStatus">Gotowy do edycji.</p>
+            </aside>
+
+            <main class="live-stage">
+                <div class="live-canvas">
+                    <div id="liveEditable" contenteditable="true"><?= $content ?></div>
+                </div>
+            </main>
+        </div>
+    </div>
+
+    <script>
+    (function(){
+        const editable = document.getElementById('liveEditable');
+        const status = document.getElementById('liveStatus');
+        const saveBtn = document.getElementById('liveSaveBtn');
+        const canvas = document.querySelector('.live-canvas');
+        let selected = null;
+        let history = [editable.innerHTML];
+        let historyIndex = 0;
+        let historyTimer = null;
+
+        function setStatus(text){ status.textContent = text; }
+
+        function pushHistory(){
+            clearTimeout(historyTimer);
+            historyTimer = setTimeout(function(){
+                const current = editable.innerHTML;
+                if (history[historyIndex] === current) return;
+                history = history.slice(0, historyIndex + 1);
+                history.push(current);
+                if (history.length > 50) history.shift();
+                historyIndex = history.length - 1;
+            }, 300);
+        }
+
+        editable.addEventListener('input', pushHistory);
+
+        function restoreHistory(index){
+            if(index < 0 || index >= history.length) return;
+            historyIndex = index;
+            editable.innerHTML = history[historyIndex];
+            setStatus('Przywrócono zmianę lokalną.');
+        }
+
+        document.getElementById('liveUndoBtn')?.addEventListener('click', function(){
+            restoreHistory(historyIndex - 1);
+        });
+
+        document.getElementById('liveRedoBtn')?.addEventListener('click', function(){
+            restoreHistory(historyIndex + 1);
+        });
+
+        document.querySelectorAll('[data-device]').forEach(function(btn){
+            btn.addEventListener('click', function(){
+                canvas.classList.remove('is-tablet','is-mobile');
+                const d = btn.dataset.device;
+                if(d === 'tablet') canvas.classList.add('is-tablet');
+                if(d === 'mobile') canvas.classList.add('is-mobile');
+                setStatus('Podgląd: ' + d);
+            });
+        });
+
+        editable.addEventListener('click', function(e){
+            if (selected) selected.classList.remove('live-selected');
+            selected = e.target.closest('section,div,article,h1,h2,h3,h4,p,ul,ol,li,img,a,span');
+            if (selected && selected !== editable) {
+                selected.classList.add('live-selected');
+                setStatus('Wybrano: ' + selected.tagName.toLowerCase());
+                e.stopPropagation();
+            }
+        });
+
+        document.getElementById('liveApplyStyle').addEventListener('click', function(){
+            if (!selected || selected === editable) { setStatus('Najpierw kliknij element.'); return; }
+            const color = document.getElementById('liveColor').value;
+            const bg = document.getElementById('liveBg').value;
+            const fs = document.getElementById('liveFontSize').value;
+            if (color) selected.style.color = color;
+            if (bg) selected.style.backgroundColor = bg;
+            if (fs) selected.style.fontSize = fs;
+            pushHistory();
+            setStatus('Zastosowano styl elementu.');
+        });
+
+        document.getElementById('liveRemoveElement').addEventListener('click', function(){
+            if (!selected || selected === editable) { setStatus('Najpierw kliknij element.'); return; }
+            if (confirm('Usunąć wybrany element?')) {
+                const tmp = selected; selected = null; tmp.remove(); pushHistory(); setStatus('Usunięto element.');
+            }
+        });
+
+        document.getElementById('liveLinkBtn')?.addEventListener('click', function(){
+            const url = prompt('Podaj adres linku:', 'https://');
+            if(!url) return;
+            document.execCommand('createLink', false, url);
+            pushHistory();
+            setStatus('Dodano/zmieniono link.');
+        });
+
+        document.getElementById('liveClearBtn')?.addEventListener('click', function(){
+            document.execCommand('removeFormat');
+            pushHistory();
+            setStatus('Wyczyszczono formatowanie zaznaczenia.');
+        });
+
+        document.querySelectorAll('[data-section]').forEach(function(btn){
+            btn.addEventListener('click', function(){
+                const type = btn.dataset.section;
+                let html = '';
+                if(type === 'hero'){
+                    html = '<section class="cms-hero" style="padding:3rem 2rem;border-radius:22px;background:linear-gradient(135deg,#f3e8ff,#e0f2fe);margin:1rem 0;"><h1>Nowy nagłówek sekcji</h1><p>Krótki opis, który możesz od razu zmienić w edytorze LIVE.</p><a class="cms-btn" href="#" style="display:inline-block;margin-top:1rem;padding:.8rem 1.2rem;border-radius:999px;background:#a855f7;color:white;text-decoration:none;font-weight:800;">Wezwanie do działania</a></section>';
+                }
+                if(type === 'cards'){
+                    html = '<section class="cms-card-grid" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:1rem;margin:1rem 0;"><div class="cms-card" style="padding:1.2rem;border-radius:16px;background:#fff;box-shadow:0 10px 30px rgba(0,0,0,.08);"><h3>Karta 1</h3><p>Opis elementu.</p></div><div class="cms-card" style="padding:1.2rem;border-radius:16px;background:#fff;box-shadow:0 10px 30px rgba(0,0,0,.08);"><h3>Karta 2</h3><p>Opis elementu.</p></div><div class="cms-card" style="padding:1.2rem;border-radius:16px;background:#fff;box-shadow:0 10px 30px rgba(0,0,0,.08);"><h3>Karta 3</h3><p>Opis elementu.</p></div></section>';
+                }
+                if(type === 'cta'){
+                    html = '<section style="padding:2rem;border-radius:20px;background:#111827;color:white;text-align:center;margin:1rem 0;"><h2>Gotowy na współpracę?</h2><p>Dodaj własny tekst i przycisk kontaktowy.</p><a href="#" style="display:inline-block;margin-top:1rem;padding:.8rem 1.2rem;border-radius:999px;background:#22c55e;color:white;text-decoration:none;font-weight:800;">Kontakt</a></section>';
+                }
+                if(type === 'faq'){
+                    html = '<section class="cms-faq" style="margin:1rem 0;"><h2>Najczęstsze pytania</h2><details style="padding:1rem;border-radius:14px;background:#fff;margin:.6rem 0;"><summary>Pytanie numer 1</summary><p>Odpowiedź na pytanie.</p></details><details style="padding:1rem;border-radius:14px;background:#fff;margin:.6rem 0;"><summary>Pytanie numer 2</summary><p>Odpowiedź na pytanie.</p></details></section>';
+                }
+                editable.insertAdjacentHTML('beforeend', html);
+                pushHistory();
+                setStatus('Dodano sekcję: ' + type);
+            });
+        });
+
+        document.querySelectorAll('[data-live-img]').forEach(function(img){
+            img.addEventListener('click', function(){
+                if(!selected || selected.tagName.toLowerCase() !== 'img'){
+                    setStatus('Najpierw kliknij obraz na stronie.');
+                    return;
+                }
+                selected.setAttribute('src', img.dataset.liveImg);
+                selected.removeAttribute('srcset');
+                pushHistory();
+                setStatus('Zmieniono obraz.');
+            });
+        });
+
+        document.addEventListener('keydown', function(e){
+            if((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's'){
+                e.preventDefault();
+                saveBtn.click();
+            }
+        });
+
+        saveBtn.addEventListener('click', function(){
+            if (selected) selected.classList.remove('live-selected');
+            const fd = new FormData();
+            fd.set('action', 'live_editor_save');
+            fd.set('csrf_token', <?= json_encode($token) ?>);
+            fd.set('file', <?= json_encode($file) ?>);
+            fd.set('html', editable.innerHTML);
+            saveBtn.disabled = true;
+            setStatus('Zapisywanie...');
+            fetch('admin.php', { method: 'POST', body: fd, credentials: 'same-origin' })
+            .then(r => r.json())
+            .then(d => {
+                saveBtn.disabled = false;
+                setStatus(d.message || (d.ok ? 'Zapisano.' : 'Błąd zapisu.'));
+                if(d.ok){ history = [editable.innerHTML]; historyIndex = 0; }
+            })
+            .catch(() => {
+                saveBtn.disabled = false;
+                setStatus('Błąd połączenia podczas zapisu.');
+            });
+        });
+    })();
+    </script>
+    </body>
+    </html>
+    <?php
+    exit;
+}
+
+// Zapis ustawień LIVE z panelu.
+if (($_POST['action'] ?? '') === 'save_live_editor_settings') {
+    if (!isset($_SESSION['logged_in']) || $_SESSION['logged_in'] !== true) {
+        http_response_code(403);
+        exit('Brak autoryzacji.');
+    }
+
+    verify_csrf_or_die();
+
+    $live_settings = [
+        'enabled' => isset($_POST['live_editor_enabled']) ? '1' : '0',
+        'backup_enabled' => isset($_POST['live_editor_backup_enabled']) ? '1' : '0',
+        'editable_selector' => 'main',
+    ];
+
+    file_put_contents(
+        $live_settings_file,
+        json_encode($live_settings, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
+        LOCK_EX
+    );
+
+    if (function_exists('spidercms_admin_log')) {
+        spidercms_admin_log('live_editor_settings_saved');
+    }
+
+    header('Location: admin.php?tab=settings&saved=live-editor');
+    exit;
+}
+// SPIDERCMS LIVE EDITOR END
+
+
+// ----------------------------------------------------------------------
 // Publiczne endpointy czatu – działają bez logowania do panelu
 // ----------------------------------------------------------------------
 $public_action = $_POST['action'] ?? $_GET['action'] ?? '';
@@ -1509,6 +3682,9 @@ if ($public_action === 'chat_public_send') {
 if ($public_action === 'chat_public_get') {
     chat_send_json(chat_public_get_messages());
 }
+if ($public_action === 'stats_track') {
+    chat_send_json(stats_track_event($_POST));
+}
 
 // ----------------------------------------------------------------------
 // Ekran logowania
@@ -1516,6 +3692,8 @@ if ($public_action === 'chat_public_get') {
 if (!isset($_SESSION['logged_in']) || $_SESSION['logged_in'] !== true) {
     if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['password']) && $_SESSION['login_block_until'] <= time()) {
         if (password_verify($_POST['password'], $ADMIN_HASH)) {
+            spidercms_log_action('login_success', 'success');
+            spidercms_security_log('login_success');
             $_SESSION['logged_in'] = true;
             $_SESSION['last_activity'] = time();
             $_SESSION['login_attempts'] = 0;
@@ -1523,6 +3701,8 @@ if (!isset($_SESSION['logged_in']) || $_SESSION['logged_in'] !== true) {
             header('Location: admin.php?tab=dashboard');
             exit;
         } else {
+            spidercms_log_action('login_failed', 'error', ['attempts' => (int)($_SESSION['login_attempts'] ?? 0) + 1]);
+            spidercms_security_log('login_failed');
             $_SESSION['login_attempts']++;
             if ($_SESSION['login_attempts'] >= $MAX_LOGIN_ATTEMPTS) {
                 $_SESSION['login_block_until'] = time() + $BLOCK_DURATION;
@@ -1585,11 +3765,89 @@ if (!isset($_SESSION['logged_in']) || $_SESSION['logged_in'] !== true) {
 $tab = $_GET['tab'] ?? 'dashboard';
 
 // ----------------------------------------------------------------------
+// Eksport logów akcji administratora
+// ----------------------------------------------------------------------
+if (isset($_GET['export_logs']) && $_GET['export_logs'] === '1') {
+    $export_format = strtolower((string)($_GET['format'] ?? 'csv'));
+    $export_action = trim((string)($_GET['log_action'] ?? ''));
+    $export_status = trim((string)($_GET['log_status'] ?? ''));
+    $export_from = trim((string)($_GET['date_from'] ?? ''));
+    $export_to = trim((string)($_GET['date_to'] ?? ''));
+    $export_logs = spidercms_read_action_logs_for_export($export_action, $export_status, $export_from, $export_to);
+    spidercms_log_action('export_action_logs', 'success', [
+        'format'=>$export_format,
+        'log_action'=>$export_action,
+        'log_status'=>$export_status,
+        'date_from'=>$export_from,
+        'date_to'=>$export_to,
+        'count'=>count($export_logs)
+    ]);
+    spidercms_export_logs($export_format, $export_logs);
+}
+
+
+// ----------------------------------------------------------------------
 // Obsługa POST
 // ----------------------------------------------------------------------
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $action = $_POST['action'] ?? '';
     verify_csrf_or_die();
+    spidercms_log_action($action !== '' ? $action : 'unknown_post', 'info', $_POST);
+
+    if ($action === 'clear_action_logs') {
+        @file_put_contents(SPIDERCMS_ACTION_LOG_FILE, '');
+        spidercms_log_action('clear_action_logs', 'success');
+        $toast = ['type'=>'success','msg'=>'Wyczyszczono logi akcji administratora.'];
+    }
+    if ($action === 'save_stats_settings') {
+        $stats_settings['enabled'] = isset($_POST['stats_enabled']) ? '1' : '0';
+        $stats_settings['ignore_admin'] = isset($_POST['stats_ignore_admin']) ? '1' : '0';
+        $stats_settings['ignore_bots'] = isset($_POST['stats_ignore_bots']) ? '1' : '0';
+        $stats_settings['throttle_minutes'] = max(1, min(1440, (int)($_POST['stats_throttle_minutes'] ?? 30)));
+        $stats_settings['online_minutes'] = max(1, min(60, (int)($_POST['stats_online_minutes'] ?? 5)));
+        stats_json_write('settings.json', $stats_settings);
+        stats_write_widget_file();
+        $updated_stats_pages = stats_sync_widget_in_pages();
+        $toast = ['type'=>'success','msg'=>'Zapisano ustawienia statystyk. Zaktualizowano stron: ' . $updated_stats_pages];
+    }
+    if ($action === 'reset_stats') {
+        foreach (['visits_daily.json','unique_daily.json','page_views.json','devices.json','browsers.json','referrers.json','online.json','recent.json','events.jsonl'] as $sf) {
+            $fp = $stats_dir . '/' . $sf;
+            if (file_exists($fp)) @unlink($fp);
+        }
+        $toast = ['type'=>'success','msg'=>'Wyczyszczono statystyki odwiedzin.'];
+    }
+
+    if ($action === 'save_slider') {
+        $all = slider_load_all();
+        $old_id = slider_slug($_POST['old_slider_id'] ?? '');
+        $slider = slider_normalize($_POST);
+        if (empty($slider['images'])) {
+            $toast = ['type'=>'error','msg'=>'Slider musi mieć przynajmniej jedno zdjęcie.'];
+        } else {
+            if ($old_id !== '' && $old_id !== $slider['id'] && isset($all[$old_id])) {
+                unset($all[$old_id]);
+            }
+            $all[$slider['id']] = $slider;
+            slider_save_all($all);
+            slider_write_widget_file();
+            $updated_slider_pages = slider_sync_widget_in_pages();
+            $toast = ['type'=>'success','msg'=>'Zapisano slider. Shortcode: [slider id="' . $slider['id'] . '"]. Zsynchronizowano stron: ' . $updated_slider_pages];
+            $_GET['edit_slider'] = $slider['id'];
+        }
+    }
+    if ($action === 'delete_slider') {
+        $id = slider_slug($_POST['slider_id'] ?? '');
+        $all = slider_load_all();
+        if ($id !== '' && isset($all[$id])) {
+            unset($all[$id]);
+            slider_save_all($all);
+            slider_write_widget_file();
+            $toast = ['type'=>'success','msg'=>'Usunięto slider.'];
+        } else {
+            $toast = ['type'=>'error','msg'=>'Nie znaleziono slidera do usunięcia.'];
+        }
+    }
     // AKCJA: TWORZENIE STRONY
     if ($action === 'create') {
         $slug = preg_replace('/[^a-z0-9\-_]+/i', '-', trim(strtolower($_POST['slug'] ?? '')));
@@ -1685,7 +3943,7 @@ HTML;
       .nav-menu.active{display:flex;}
       .menu-toggle{display:block;}
     }
-    main{margin-top:calc(var(--header-height) + 16px);padding:2rem 1rem;flex:1;}
+    main{margin-top:calc(var(--header-height) + 16px);padding:2rem 1rem;flex:1;width:100%;max-width:var(--content-width);margin-left:auto;margin-right:auto;}
     .site-footer{background:var(--footer-bg);color:var(--footer-text);padding:3rem 1.5rem;margin-top:5rem;font-size:0.95rem;}
     .footer-container{max-width:var(--content-width);margin:0 auto;display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:2.5rem;text-align:left;}
     .footer-col h4{color:var(--primary);margin-bottom:1rem;font-size:1.15rem;}
@@ -1702,6 +3960,7 @@ HTML;
 // ZMIANA: Zamiast generować stopkę w każdym pliku osobno, wczytujemy globalny plik footer.php
 require_once dirname(__DIR__, __ROOT_DEPTH__) . '/footer.php';
 require_once dirname(__DIR__, __ROOT_DEPTH__) . '/chat-widget.php';
+require_once dirname(__DIR__, __ROOT_DEPTH__) . '/slider-widget.php';
 ?>
 
 <script>
@@ -1716,11 +3975,23 @@ require_once dirname(__DIR__, __ROOT_DEPTH__) . '/chat-widget.php';
         try { localStorage.setItem(storageKey, tabName); } catch(e) {}
     }
     buttons.forEach(btn => btn.addEventListener('click', () => activate(btn.dataset.settingsTab)));
-    let saved = 'general';
-    try { saved = localStorage.getItem(storageKey) || 'general'; } catch(e) {}
+    const params = new URLSearchParams(window.location.search);
+    let saved = params.get('settings') || 'general';
+    if (!saved) { try { saved = localStorage.getItem(storageKey) || 'general'; } catch(e) {} }
     if (!document.querySelector('.settings-tab-btn[data-settings-tab="' + saved + '"]')) saved = 'general';
     activate(saved);
 })();
+</script>
+
+<script>
+document.addEventListener('DOMContentLoaded', function(){
+    const preset = document.getElementById('content_width_preset');
+    const input = document.getElementById('content_width');
+    if (!preset || !input) return;
+    preset.addEventListener('change', function(){
+        if (this.value) input.value = this.value;
+    });
+});
 </script>
 
 <script>
@@ -1810,6 +4081,138 @@ document.addEventListener('DOMContentLoaded', function(){
 });
 </script>
 
+
+<script>
+(function(){
+  const map = {
+    size: document.getElementById('header_title_font_size'),
+    weight: document.getElementById('header_title_font_weight'),
+    color: document.getElementById('header_title_color'),
+    upper: document.querySelector('input[name="header_title_uppercase"]'),
+    italic: document.querySelector('input[name="header_title_italic"]'),
+    shadow: document.querySelector('input[name="header_title_shadow"]'),
+    bg: document.getElementById('header_title_bg'),
+    radius: document.getElementById('header_title_radius'),
+    preview: document.getElementById('headerTitlePreview')
+  };
+  if (!map.preview) return;
+  function upd(){
+    map.preview.style.fontSize = ((map.size && map.size.value) || 22) + 'px';
+    map.preview.style.fontWeight = (map.weight && map.weight.value) || 800;
+    map.preview.style.color = (map.color && map.color.value) || '#f8fafc';
+    map.preview.style.textTransform = (map.upper && map.upper.checked) ? 'uppercase' : 'none';
+    map.preview.style.fontStyle = (map.italic && map.italic.checked) ? 'italic' : 'normal';
+    map.preview.style.textShadow = (map.shadow && map.shadow.checked) ? '0 2px 10px rgba(0,0,0,.45)' : 'none';
+    map.preview.style.background = (map.bg && map.bg.value) || 'transparent';
+    map.preview.style.borderRadius = ((map.radius && map.radius.value) || 0) + 'px';
+    map.preview.style.padding = (map.bg && map.bg.value) ? '.18em .42em' : '0';
+  }
+  Object.values(map).forEach(el => { if (el && el.addEventListener) { el.addEventListener('input', upd); el.addEventListener('change', upd); } });
+  upd();
+})();
+</script>
+
+
+<script>
+document.addEventListener('DOMContentLoaded', function(){
+    const list = document.getElementById('slider-images-list');
+    const add = document.getElementById('add-slider-image');
+
+    if (!list) return;
+
+    function escAttr(value){
+        return String(value || '').replace(/[&<>'"]/g, function(c){
+            return {'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#039;','"':'&quot;'}[c];
+        });
+    }
+
+    function rowHtml(url, title, desc){
+        return ''
+            + '<div><label>Adres zdjęcia</label><input type="text" name="image_url[]" value="' + escAttr(url || '') + '" placeholder="uploads/zdjecie.jpg"></div>'
+            + '<div><label>Tytuł</label><input type="text" name="image_title[]" value="' + escAttr(title || '') + '" placeholder="Opcjonalnie"></div>'
+            + '<div><label>Opis</label><input type="text" name="image_desc[]" value="' + escAttr(desc || '') + '" placeholder="Opcjonalnie"></div>'
+            + '<button type="button" class="remove-slider-image" style="background:#ef4444;color:white;border:0;border-radius:8px;padding:.75rem;cursor:pointer;"><i class="fa-solid fa-trash"></i></button>';
+    }
+
+    function createRow(url, title, desc){
+        const row = document.createElement('div');
+        row.className = 'slider-image-row';
+        row.style.cssText = 'display:grid;grid-template-columns:1.2fr 1fr 1fr auto;gap:.7rem;align-items:end;background:#1e293b;border:1px solid #334155;border-radius:12px;padding:1rem;';
+        row.innerHTML = rowHtml(url || '', title || '', desc || '');
+        return row;
+    }
+
+    function isEmptyRow(row){
+        const input = row ? row.querySelector('input[name="image_url[]"]') : null;
+        return input && input.value.trim() === '';
+    }
+
+    function addSliderImage(url, title, desc){
+        const rows = list.querySelectorAll('.slider-image-row');
+        if (url && rows.length === 1 && isEmptyRow(rows[0])) {
+            rows[0].querySelector('input[name="image_url[]"]').value = url;
+            rows[0].querySelector('input[name="image_title[]"]').value = title || '';
+            rows[0].querySelector('input[name="image_desc[]"]').value = desc || '';
+            return;
+        }
+        list.appendChild(createRow(url || '', title || '', desc || ''));
+    }
+
+    if (add) {
+        add.addEventListener('click', function(e){
+            e.preventDefault();
+            addSliderImage('', '', '');
+        });
+    }
+
+    document.addEventListener('click', function(e){
+        const removeBtn = e.target.closest('.remove-slider-image');
+        if (removeBtn && list.contains(removeBtn)) {
+            e.preventDefault();
+            const rows = list.querySelectorAll('.slider-image-row');
+            const row = removeBtn.closest('.slider-image-row');
+            if (rows.length <= 1) {
+                row.querySelectorAll('input').forEach(function(i){ i.value = ''; });
+            } else if (row) {
+                row.remove();
+            }
+            return;
+        }
+
+        const galleryBtn = e.target.closest('.slider-gallery-add');
+        if (galleryBtn) {
+            e.preventDefault();
+            addSliderImage(galleryBtn.dataset.url || '', '', '');
+            galleryBtn.style.outline = '2px solid #22c55e';
+            galleryBtn.style.outlineOffset = '2px';
+            setTimeout(function(){ galleryBtn.style.outline = ''; galleryBtn.style.outlineOffset = ''; }, 500);
+        }
+    });
+});
+</script>
+
+
+<script>
+(function(){
+    const btn = document.getElementById('spidercmsMobileMenuBtn');
+    const backdrop = document.getElementById('spidercmsSidebarBackdrop');
+    const body = document.body;
+    function closeMenu(){
+        body.classList.remove('spidercms-sidebar-open');
+        if (btn) btn.setAttribute('aria-expanded','false');
+    }
+    function toggleMenu(){
+        const open = body.classList.toggle('spidercms-sidebar-open');
+        if (btn) btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+    }
+    if (btn) btn.addEventListener('click', toggleMenu);
+    if (backdrop) backdrop.addEventListener('click', closeMenu);
+    document.addEventListener('keydown', function(e){ if(e.key === 'Escape') closeMenu(); });
+    document.querySelectorAll('#sidebar a').forEach(function(a){
+        a.addEventListener('click', function(){ if (window.innerWidth <= 1024) closeMenu(); });
+    });
+})();
+</script>
 </body>
 </html>
 PHP;
@@ -1843,20 +4246,41 @@ PHP;
 
     // AKCJA: EDYCJA STRONY
     if ($action === 'edit') {
-        $slug = trim($_POST['slug'] ?? '');
-        $file = ACTIVE_PAGES_DIR . '/' . $slug . '.php';
-        if (file_exists($file)) {
-            $new_content = $_POST['content'] ?? '';
-            $old = file_get_contents($file);
-            if (preg_match('/\$content\s*=\s*<<<HTML\s*(.*?)\s*HTML;/s', $old, $m)) {
-                $updated = str_replace($m[1], $new_content, $old);
-                file_put_contents($file, $updated);
-                $toast = ['type'=>'success', 'msg'=>'Zapisano zmiany'];
-            } else {
-                $toast = ['type'=>'error', 'msg'=>'Nie znaleziono bloku treści'];
-            }
+        $old_slug = spidercms_clean_slug($_POST['old_slug'] ?? ($_POST['slug'] ?? ''));
+        $new_slug = spidercms_clean_slug($_POST['new_slug'] ?? ($_POST['slug'] ?? ''));
+        $new_title = trim((string)($_POST['title'] ?? ''));
+        $new_content = $_POST['content'] ?? '';
+
+        if ($new_slug === '') {
+            $toast = ['type'=>'error', 'msg'=>'Slug strony nie może być pusty.'];
         } else {
-            $toast = ['type'=>'error', 'msg'=>'Strona nie istnieje'];
+            $old_file = ACTIVE_PAGES_DIR . '/' . $old_slug . '.php';
+            $new_file = ACTIVE_PAGES_DIR . '/' . $new_slug . '.php';
+
+            if (!file_exists($old_file)) {
+                $toast = ['type'=>'error', 'msg'=>'Strona źródłowa nie istnieje.'];
+            } elseif ($new_slug !== $old_slug && file_exists($new_file)) {
+                $toast = ['type'=>'error', 'msg'=>'Nie można zmienić sluga. Plik ' . $new_slug . '.php już istnieje.'];
+            } else {
+                $old = file_get_contents($old_file);
+                if (preg_match('/\$content\s*=\s*<<<HTML\s*(.*?)\s*HTML;/s', $old, $m)) {
+                    $updated = str_replace($m[1], $new_content, $old);
+                    if ($new_title !== '') {
+                        $updated = spidercms_page_set_title_in_source($updated, $new_title);
+                    }
+                    file_put_contents($new_file, $updated);
+                    if ($new_slug !== $old_slug && file_exists($old_file)) {
+                        @unlink($old_file);
+                    }
+                    $toast = ['type'=>'success', 'msg'=>'Zapisano zmiany strony.'];
+                    if ($new_slug !== $old_slug) {
+                        header('Location: admin.php?tab=strony&edit=' . urlencode($new_slug) . '&renamed=1');
+                        exit;
+                    }
+                } else {
+                    $toast = ['type'=>'error', 'msg'=>'Nie znaleziono bloku treści'];
+                }
+            }
         }
     }
     // AKCJA: USUWANIE STRONY
@@ -1873,6 +4297,51 @@ PHP;
                 $toast = ['type'=>'success', 'msg'=>'Strona usunięta'];
             } else {
                 $toast = ['type'=>'error', 'msg'=>'Błąd usuwania'];
+            }
+        }
+    }
+
+    // AKCJA: DUPLIKOWANIE STRONY
+    if ($action === 'duplicate') {
+        $slug = preg_replace('/[^a-z0-9\-_]+/i', '-', trim((string)($_POST['slug'] ?? '')));
+        $source_file = ACTIVE_PAGES_DIR . '/' . $slug . '.php';
+
+        if ($slug === '' || !file_exists($source_file)) {
+            $toast = ['type'=>'error', 'msg'=>'Nie można zduplikować strony, ponieważ plik źródłowy nie istnieje.'];
+        } else {
+            $base_slug = $slug . '-kopia';
+            $new_slug = $base_slug;
+            $counter = 2;
+
+            while (file_exists(ACTIVE_PAGES_DIR . '/' . $new_slug . '.php')) {
+                $new_slug = $base_slug . '-' . $counter;
+                $counter++;
+            }
+
+            $new_file = ACTIVE_PAGES_DIR . '/' . $new_slug . '.php';
+            $content = file_get_contents($source_file);
+
+            // Zmieniamy tytuł strony w kopii, jeżeli w pliku istnieje standardowa zmienna $title.
+            $content = preg_replace_callback(
+                '/\\$title\\s*=\\s*([\'\"])(.*?)\\1\\s*;/s',
+                function ($m) {
+                    $quote = $m[1];
+                    $title = $m[2];
+                    if (stripos($title, 'kopia') === false) {
+                        $title .= ' – kopia';
+                    }
+                    $title = addcslashes($title, "\\" . $quote);
+                    return '$title = ' . $quote . $title . $quote . ';';
+                },
+                $content,
+                1
+            );
+
+            if (file_put_contents($new_file, $content) !== false) {
+                header('Location: admin.php?tab=strony&edit=' . urlencode($new_slug) . '&duplicated=1');
+                exit;
+            } else {
+                $toast = ['type'=>'error', 'msg'=>'Nie udało się zapisać kopii strony.'];
             }
         }
     }
@@ -2049,6 +4518,257 @@ PHP;
         header('Location: admin.php?tab=stopka');
         exit;
     }
+    // AKCJA: ZASTOSOWANIE GOTOWEGO PRESETU WYGLĄDU STRONY
+    if ($action === 'apply_site_preset') {
+        $preset_key = preg_replace('/[^a-z0-9_-]/i', '', (string)($_POST['site_preset'] ?? ''));
+
+        $presets = [
+            'minimal' => [
+                'name' => 'Minimal jasny',
+                'theme' => [
+                    'primary' => '#2563eb',
+                    'primary-dark' => '#1d4ed8',
+                    'accent' => '#0ea5e9',
+                    'page-bg' => '#ffffff',
+                    'page-text' => '#111827',
+                    'header-bg' => '#ffffff',
+                    'header-text' => '#111827',
+                    'footer-bg' => '#111827',
+                    'footer-text' => '#f9fafb',
+                    'footer-muted' => '#9ca3af',
+                    'link-color' => '#2563eb',
+                    'button-bg' => '#2563eb',
+                    'button-text' => '#ffffff',
+                    'font-family' => 'system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
+                    'header-height' => '74',
+                    'logo-height' => '58',
+                    'content-width' => '1100',
+                    'border-radius' => '10',
+                    'shadow-enabled' => '1',
+                    'menu-position' => 'right',
+                ],
+                'settings' => [
+                    'header_title_font_size' => '22',
+                    'header_title_font_weight' => '800',
+                    'header_title_color' => '#111827',
+                    'header_title_gap' => '10',
+                    'header_title_uppercase' => '0',
+                    'header_title_italic' => '0',
+                    'header_title_shadow' => '0',
+                    'header_title_bg' => '',
+                    'header_title_radius' => '0',
+                ],
+            ],
+            'corporate' => [
+                'name' => 'Corporate',
+                'theme' => [
+                    'primary' => '#1e40af',
+                    'primary-dark' => '#172554',
+                    'accent' => '#f59e0b',
+                    'page-bg' => '#f8fafc',
+                    'page-text' => '#0f172a',
+                    'header-bg' => '#ffffff',
+                    'header-text' => '#1f2937',
+                    'footer-bg' => '#0f172a',
+                    'footer-text' => '#f8fafc',
+                    'footer-muted' => '#cbd5e1',
+                    'link-color' => '#1d4ed8',
+                    'button-bg' => '#1e40af',
+                    'button-text' => '#ffffff',
+                    'font-family' => 'Arial, Helvetica, sans-serif',
+                    'header-height' => '82',
+                    'logo-height' => '64',
+                    'content-width' => '1240',
+                    'border-radius' => '8',
+                    'shadow-enabled' => '1',
+                    'menu-position' => 'right',
+                ],
+                'settings' => [
+                    'header_title_font_size' => '24',
+                    'header_title_font_weight' => '800',
+                    'header_title_color' => '#0f172a',
+                    'header_title_gap' => '12',
+                    'header_title_uppercase' => '0',
+                    'header_title_italic' => '0',
+                    'header_title_shadow' => '0',
+                    'header_title_bg' => '',
+                    'header_title_radius' => '0',
+                ],
+            ],
+            'dark' => [
+                'name' => 'Dark premium',
+                'theme' => [
+                    'primary' => '#8b5cf6',
+                    'primary-dark' => '#4c1d95',
+                    'accent' => '#22d3ee',
+                    'page-bg' => '#020617',
+                    'page-text' => '#e5e7eb',
+                    'header-bg' => '#0f172a',
+                    'header-text' => '#f8fafc',
+                    'footer-bg' => '#020617',
+                    'footer-text' => '#f8fafc',
+                    'footer-muted' => '#94a3b8',
+                    'link-color' => '#a78bfa',
+                    'button-bg' => '#8b5cf6',
+                    'button-text' => '#ffffff',
+                    'font-family' => 'system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
+                    'header-height' => '78',
+                    'logo-height' => '58',
+                    'content-width' => '1180',
+                    'border-radius' => '16',
+                    'shadow-enabled' => '1',
+                    'menu-position' => 'right',
+                ],
+                'settings' => [
+                    'header_title_font_size' => '23',
+                    'header_title_font_weight' => '900',
+                    'header_title_color' => '#f8fafc',
+                    'header_title_gap' => '12',
+                    'header_title_uppercase' => '0',
+                    'header_title_italic' => '0',
+                    'header_title_shadow' => '1',
+                    'header_title_bg' => 'rgba(255,255,255,.06)',
+                    'header_title_radius' => '10',
+                ],
+            ],
+            'glass' => [
+                'name' => 'Glass / nowoczesny',
+                'theme' => [
+                    'primary' => '#7c3aed',
+                    'primary-dark' => '#312e81',
+                    'accent' => '#06b6d4',
+                    'page-bg' => '#eef2ff',
+                    'page-text' => '#111827',
+                    'header-bg' => '#ffffff',
+                    'header-text' => '#111827',
+                    'footer-bg' => '#111827',
+                    'footer-text' => '#f8fafc',
+                    'footer-muted' => '#cbd5e1',
+                    'link-color' => '#7c3aed',
+                    'button-bg' => '#7c3aed',
+                    'button-text' => '#ffffff',
+                    'font-family' => 'Inter, system-ui, sans-serif',
+                    'header-height' => '84',
+                    'logo-height' => '64',
+                    'content-width' => '1200',
+                    'border-radius' => '18',
+                    'shadow-enabled' => '1',
+                    'menu-position' => 'center',
+                ],
+                'settings' => [
+                    'header_title_font_size' => '24',
+                    'header_title_font_weight' => '900',
+                    'header_title_color' => '#312e81',
+                    'header_title_gap' => '12',
+                    'header_title_uppercase' => '0',
+                    'header_title_italic' => '0',
+                    'header_title_shadow' => '0',
+                    'header_title_bg' => 'rgba(124,58,237,.08)',
+                    'header_title_radius' => '14',
+                ],
+            ],
+            'landing' => [
+                'name' => 'Landing page',
+                'theme' => [
+                    'primary' => '#f97316',
+                    'primary-dark' => '#9a3412',
+                    'accent' => '#14b8a6',
+                    'page-bg' => '#fff7ed',
+                    'page-text' => '#1f2937',
+                    'header-bg' => '#ffffff',
+                    'header-text' => '#1f2937',
+                    'footer-bg' => '#1f2937',
+                    'footer-text' => '#fff7ed',
+                    'footer-muted' => '#fed7aa',
+                    'link-color' => '#ea580c',
+                    'button-bg' => '#f97316',
+                    'button-text' => '#ffffff',
+                    'font-family' => 'system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
+                    'header-height' => '76',
+                    'logo-height' => '58',
+                    'content-width' => '1040',
+                    'border-radius' => '22',
+                    'shadow-enabled' => '1',
+                    'menu-position' => 'right',
+                ],
+                'settings' => [
+                    'header_title_font_size' => '22',
+                    'header_title_font_weight' => '900',
+                    'header_title_color' => '#9a3412',
+                    'header_title_gap' => '12',
+                    'header_title_uppercase' => '0',
+                    'header_title_italic' => '0',
+                    'header_title_shadow' => '0',
+                    'header_title_bg' => '',
+                    'header_title_radius' => '0',
+                ],
+            ],
+            'neon' => [
+                'name' => 'Neon / SpiderCMS',
+                'theme' => [
+                    'primary' => '#a855f7',
+                    'primary-dark' => '#581c87',
+                    'accent' => '#2563eb',
+                    'page-bg' => '#0f172a',
+                    'page-text' => '#f8fafc',
+                    'header-bg' => '#111827',
+                    'header-text' => '#f8fafc',
+                    'footer-bg' => '#020617',
+                    'footer-text' => '#f8fafc',
+                    'footer-muted' => '#94a3b8',
+                    'link-color' => '#c084fc',
+                    'button-bg' => '#a855f7',
+                    'button-text' => '#ffffff',
+                    'font-family' => 'system-ui, sans-serif',
+                    'header-height' => '82',
+                    'logo-height' => '68',
+                    'content-width' => '1240',
+                    'border-radius' => '14',
+                    'shadow-enabled' => '1',
+                    'menu-position' => 'right',
+                ],
+                'settings' => [
+                    'header_title_font_size' => '24',
+                    'header_title_font_weight' => '900',
+                    'header_title_color' => '#f8fafc',
+                    'header_title_gap' => '12',
+                    'header_title_uppercase' => '0',
+                    'header_title_italic' => '0',
+                    'header_title_shadow' => '1',
+                    'header_title_bg' => 'rgba(168,85,247,.12)',
+                    'header_title_radius' => '12',
+                ],
+            ],
+        ];
+
+        if (!isset($presets[$preset_key])) {
+            $toast = ['type' => 'error', 'msg' => 'Nie wybrano poprawnego presetu strony.'];
+        } else {
+            $chosen = $presets[$preset_key];
+            $theme_data = array_merge($theme_defaults, $theme, $chosen['theme']);
+            $theme = $theme_data;
+            file_put_contents($theme_file, json_encode($theme_data, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES));
+
+            $settings = array_merge($settings, $chosen['settings']);
+            if (!isset($settings['header_enabled'])) $settings['header_enabled'] = '1';
+            if (!isset($settings['show_site_name_in_header'])) $settings['show_site_name_in_header'] = '0';
+            file_put_contents($settings_file, json_encode($settings, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES));
+
+            spidercms_write_header_with_submenu_support();
+            spidercms_sync_header_bootstrap_in_pages();
+            update_all_pages_colors();
+            spidercms_force_theme_refresh();
+            // Wyłączone: nie modyfikujemy stron przy samym wejściu do panelu.
+// spidercms_sync_content_width_in_pages();
+            // Wyłączone: ta funkcja modyfikowała publiczne strony przy każdym odświeżeniu panelu.
+// spidercms_fix_opaque_header_in_pages();
+
+            $toast = ['type' => 'success', 'msg' => 'Zastosowano preset: ' . $chosen['name'] . '. Kolory i ustawienia poniżej zostały odświeżone.'];
+            $tab = 'ustawienia';
+            $_GET['settings'] = 'appearance';
+        }
+    }
+
     // AKCJA: ZAPIS USTAWIEŃ I MOTYWU
     if ($action === 'save_settings') {
         $new_site_name = trim($_POST['site_name'] ?? '');
@@ -2135,10 +4855,23 @@ PHP;
             file_put_contents($GLOBALS['page_folder_file'], json_encode(['folder' => $requested_page_folder], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
             $settings['logo'] = $logo_path;
             $settings['header_enabled'] = !empty($_POST['header_enabled']) ? '1' : '0';
+            $settings['show_site_name_in_header'] = !empty($_POST['show_site_name_in_header']) ? '1' : '0';
+            $settings['header_title_font_size'] = preg_replace('/[^0-9.]/', '', $_POST['header_title_font_size'] ?? '22') ?: '22';
+            $settings['header_title_font_weight'] = preg_replace('/[^0-9]/', '', $_POST['header_title_font_weight'] ?? '800') ?: '800';
+            $settings['header_title_color'] = trim((string)($_POST['header_title_color'] ?? ''));
+            $settings['header_title_gap'] = preg_replace('/[^0-9.]/', '', $_POST['header_title_gap'] ?? '10') ?: '10';
+            $settings['header_title_uppercase'] = !empty($_POST['header_title_uppercase']) ? '1' : '0';
+            $settings['header_title_italic'] = !empty($_POST['header_title_italic']) ? '1' : '0';
+            $settings['header_title_shadow'] = !empty($_POST['header_title_shadow']) ? '1' : '0';
+            $settings['header_title_bg'] = trim((string)($_POST['header_title_bg'] ?? ''));
+            $settings['header_title_radius'] = preg_replace('/[^0-9.]/', '', $_POST['header_title_radius'] ?? '0') ?: '0';
             file_put_contents($settings_file, json_encode($settings, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
             spidercms_write_header_with_submenu_support();
             spidercms_sync_header_bootstrap_in_pages();
             $updated_pages = update_all_pages_colors();
+            spidercms_force_theme_refresh();
+            // Wyłączone: nie modyfikujemy stron przy samym wejściu do panelu.
+// spidercms_sync_content_width_in_pages();
             header('Location: admin.php?tab=ustawienia');
             exit;
         }
@@ -2283,6 +5016,15 @@ PHP;
             'welcome' => chat_clean_text($_POST['chat_welcome'] ?? 'Cześć! W czym możemy pomóc?', 250),
             'button_text' => chat_clean_text($_POST['chat_button_text'] ?? 'Chat', 40),
             'admin_name' => chat_clean_text($_POST['chat_admin_name'] ?? 'Administrator', 80),
+            'email_notifications' => !empty($_POST['chat_email_notifications']) ? '1' : '0',
+            'admin_email' => filter_var(trim((string)($_POST['chat_admin_email'] ?? '')), FILTER_VALIDATE_EMAIL) ? trim((string)$_POST['chat_admin_email']) : '',
+            'from_email' => filter_var(trim((string)($_POST['chat_from_email'] ?? '')), FILTER_VALIDATE_EMAIL) ? trim((string)$_POST['chat_from_email']) : '',
+            'mail_method' => in_array(($_POST['chat_mail_method'] ?? 'smtp'), ['smtp','mail'], true) ? $_POST['chat_mail_method'] : 'smtp',
+            'smtp_host' => chat_clean_text($_POST['chat_smtp_host'] ?? '', 180),
+            'smtp_port' => preg_replace('/[^0-9]/', '', (string)($_POST['chat_smtp_port'] ?? '465')) ?: '465',
+            'smtp_secure' => in_array(($_POST['chat_smtp_secure'] ?? 'ssl'), ['ssl','tls','none'], true) ? $_POST['chat_smtp_secure'] : 'ssl',
+            'smtp_username' => chat_clean_text($_POST['chat_smtp_username'] ?? '', 180),
+            'smtp_password' => ($_POST['chat_smtp_password'] ?? '') !== '' ? (string)$_POST['chat_smtp_password'] : (string)($chat_settings['smtp_password'] ?? ''),
         ];
         file_put_contents($chat_settings_file, json_encode($chat_settings_save, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES));
         $chat_settings = array_merge($chat_settings_defaults, $chat_settings_save);
@@ -2291,6 +5033,32 @@ PHP;
         $toast = ['type' => 'success', 'msg' => 'Zapisano ustawienia czatu. Zsynchronizowano podstrony: ' . $changed];
         header('Location: admin.php?tab=chat');
         exit;
+    }
+
+    if ($action === 'test_chat_email') {
+        $test_settings_save = [
+            'enabled' => !empty($_POST['chat_enabled']) ? '1' : '0',
+            'title' => chat_clean_text($_POST['chat_title'] ?? 'Masz pytanie?', 100),
+            'subtitle' => chat_clean_text($_POST['chat_subtitle'] ?? 'Napisz do nas.', 180),
+            'welcome' => chat_clean_text($_POST['chat_welcome'] ?? 'Cześć! W czym możemy pomóc?', 250),
+            'button_text' => chat_clean_text($_POST['chat_button_text'] ?? 'Chat', 40),
+            'admin_name' => chat_clean_text($_POST['chat_admin_name'] ?? 'Administrator', 80),
+            'email_notifications' => !empty($_POST['chat_email_notifications']) ? '1' : '0',
+            'admin_email' => filter_var(trim((string)($_POST['chat_admin_email'] ?? '')), FILTER_VALIDATE_EMAIL) ? trim((string)$_POST['chat_admin_email']) : '',
+            'from_email' => filter_var(trim((string)($_POST['chat_from_email'] ?? '')), FILTER_VALIDATE_EMAIL) ? trim((string)$_POST['chat_from_email']) : '',
+            'mail_method' => in_array(($_POST['chat_mail_method'] ?? 'smtp'), ['smtp','mail'], true) ? $_POST['chat_mail_method'] : 'smtp',
+            'smtp_host' => chat_clean_text($_POST['chat_smtp_host'] ?? '', 180),
+            'smtp_port' => preg_replace('/[^0-9]/', '', (string)($_POST['chat_smtp_port'] ?? '465')) ?: '465',
+            'smtp_secure' => in_array(($_POST['chat_smtp_secure'] ?? 'ssl'), ['ssl','tls','none'], true) ? $_POST['chat_smtp_secure'] : 'ssl',
+            'smtp_username' => chat_clean_text($_POST['chat_smtp_username'] ?? '', 180),
+            'smtp_password' => ($_POST['chat_smtp_password'] ?? '') !== '' ? (string)$_POST['chat_smtp_password'] : (string)($chat_settings['smtp_password'] ?? ''),
+        ];
+        file_put_contents($chat_settings_file, json_encode($test_settings_save, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES));
+        $chat_settings = array_merge($chat_settings_defaults, $test_settings_save);
+        $ok = chat_notify_admin_by_email('test_' . date('YmdHis'), 'Test SpiderCMS', '', 'To jest test powiadomienia e-mail z panelu SpiderCMS.', true);
+        $toast = $ok
+            ? ['type' => 'success', 'msg' => 'Wysłano testowe powiadomienie e-mail przez wybraną metodę. Sprawdź skrzynkę oraz SPAM.']
+            : ['type' => 'error', 'msg' => 'Nie udało się wysłać testu. Sprawdź SMTP host, port, szyfrowanie, login, hasło oraz log: .chat/email.log'];
     }
 
     if ($action === 'chat_reply') {
@@ -2355,6 +5123,11 @@ PHP;
         header('Location: admin.php?tab=chat');
         exit;
     }
+
+    if ($action !== '' && $action !== 'clear_action_logs') {
+        $log_status = (!empty($toast['type']) && $toast['type'] === 'error') ? 'error' : 'success';
+        spidercms_log_action($action, $log_status, ['toast' => $toast['msg'] ?? '']);
+    }
 }
 
 // ----------------------------------------------------------------------
@@ -2369,10 +5142,22 @@ foreach (glob(ACTIVE_PAGES_DIR . '/*.php') ?: [] as $f) {
 }
 // Media Library - musi być zawsze zdefiniowane
 $media_files = get_media_files();
+$sliders = slider_load_all();
+$edit_slider_id = slider_slug($_GET['edit_slider'] ?? '');
+$edit_slider = ($edit_slider_id !== '' && isset($sliders[$edit_slider_id])) ? $sliders[$edit_slider_id] : null;
 $chat_conversations = chat_load_conversations();
 chat_backfill_archive_from_conversations();
 $chat_archive_index = chat_load_archive_index();
 $chat_unread = chat_unread_count();
+$log_filter_action = trim((string)($_GET['log_action'] ?? ''));
+$log_filter_status = trim((string)($_GET['log_status'] ?? ''));
+$action_logs = array_slice(spidercms_read_action_logs_for_export($log_filter_action, $log_filter_status, trim((string)($_GET['date_from'] ?? '')), trim((string)($_GET['date_to'] ?? ''))), 0, 300);
+$log_actions_available = [];
+foreach (spidercms_read_action_logs(1000) as $lr) {
+    $a = $lr['action'] ?? '';
+    if ($a !== '') $log_actions_available[$a] = spidercms_log_label($a);
+}
+asort($log_actions_available);
 // Jeżeli wskazana strona główna nie istnieje, wracamy do index.php albo pierwszej dostępnej strony.
 $page_slugs = array_column($pages, 'slug');
 if (!in_array($homepage_slug, $page_slugs, true)) {
@@ -2380,10 +5165,12 @@ if (!in_array($homepage_slug, $page_slugs, true)) {
     file_put_contents(__DIR__ . '/.homepage', $homepage_slug);
 }
 
-$edit_slug = $_GET['edit'] ?? '';
+$edit_slug = spidercms_clean_slug($_GET['edit'] ?? '');
 $edit_content = '';
+$edit_title = '';
 if ($edit_slug && file_exists($f = ACTIVE_PAGES_DIR . '/' . $edit_slug . '.php')) {
     $raw = file_get_contents($f);
+    $edit_title = spidercms_page_get_title_from_source($raw, $edit_slug);
     if (preg_match('/\$content\s*=\s*<<<HTML\s*(.*?)\s*HTML;/s', $raw, $m)) {
         $edit_content = trim($m[1]);
     }
@@ -2404,6 +5191,19 @@ function render_editor_tools() {
             <button type="button" class="editor-tool-btn" data-snippet="separator"><i class="fa-solid fa-minus"></i> Separator</button>
         </div>
         <div class="editor-note">Kliknięcie wstawia gotowy blok w miejscu kursora w edytorze. Bloki możesz później dowolnie edytować w TinyMCE.</div>
+    </div>
+
+    <div class="editor-tools editor-page-presets">
+        <h3><i class="fa-solid fa-layer-group"></i> Gotowe presety stron</h3>
+        <div class="editor-tool-grid">
+            <button type="button" class="editor-tool-btn page-preset-btn" data-page-preset="contact"><i class="fa-solid fa-address-book"></i> Kontakt</button>
+            <button type="button" class="editor-tool-btn page-preset-btn" data-page-preset="about"><i class="fa-solid fa-circle-info"></i> O nas</button>
+            <button type="button" class="editor-tool-btn page-preset-btn" data-page-preset="offer"><i class="fa-solid fa-briefcase"></i> Oferta</button>
+            <button type="button" class="editor-tool-btn page-preset-btn" data-page-preset="services"><i class="fa-solid fa-screwdriver-wrench"></i> Usługi</button>
+            <button type="button" class="editor-tool-btn page-preset-btn" data-page-preset="landing"><i class="fa-solid fa-bullhorn"></i> Landing Page</button>
+            <button type="button" class="editor-tool-btn page-preset-btn" data-page-preset="faqpage"><i class="fa-solid fa-circle-question"></i> FAQ / Pomoc</button>
+        </div>
+        <div class="editor-note">Preset strony zastępuje aktualną treść edytora gotowym, stylowym układem. Przy tworzeniu nowej strony automatycznie podpowie też tytuł i slug.</div>
     </div>
     <?php
 }
@@ -2446,7 +5246,7 @@ function render_editor_tools() {
             --gray-50: #0f172a;
             --gray-100: #1e293b;
             --gray-200: #334155;
-            --sidebar: 260px;
+            --sidebar: 320px;
             --menu-color: #c084fc;
             --footer-color: #fb923c;
             --settings-color: #60a5fa;
@@ -2456,16 +5256,25 @@ function render_editor_tools() {
         * { margin:0; padding:0; box-sizing:border-box; }
         body { font-family:system-ui,sans-serif; background:var(--gray-50); color:#f8fafc; min-height:100vh; display:flex; }
         #sidebar { width:var(--sidebar); background:#0f172a; border-right:1px solid var(--gray-200); height:100vh; position:fixed; overflow-y:auto; }
-        #sidebar-header { padding:1.2rem 1.4rem; font-size:1.45rem; font-weight:700; color:var(--primary); border-bottom:1px solid var(--gray-200); display:flex; align-items:center; gap:0.6rem; }
+        #sidebar { scrollbar-width:thin; scrollbar-color:rgba(168,85,247,.55) rgba(15,23,42,.35); }
+        #sidebar::-webkit-scrollbar { width:9px; }
+        #sidebar::-webkit-scrollbar-track { background:linear-gradient(180deg,rgba(15,23,42,.95),rgba(2,6,23,.95)); border-left:1px solid rgba(148,163,184,.10); }
+        #sidebar::-webkit-scrollbar-thumb { background:linear-gradient(180deg,rgba(168,85,247,.85),rgba(37,99,235,.75)); border-radius:999px; border:2px solid rgba(15,23,42,.95); box-shadow:inset 0 0 0 1px rgba(255,255,255,.08); }
+        #sidebar::-webkit-scrollbar-thumb:hover { background:linear-gradient(180deg,rgba(192,132,252,.95),rgba(56,189,248,.85)); }
+        #sidebar::-webkit-scrollbar-corner { background:#0f172a; }
+        #sidebar-header { padding:1.35rem 1.65rem; font-size:1.45rem; font-weight:700; color:var(--primary); border-bottom:1px solid var(--gray-200); display:flex; align-items:center; gap:0.6rem; }
         #sidebar-header img { max-height:80px; width:auto; border-radius:4px; }
-        #sidebar a { display:flex; align-items:center; gap:0.8rem; padding:0.95rem 1.4rem; color:#94a3b8; text-decoration:none; transition:0.15s; }
+        #sidebar a { display:flex; align-items:center; gap:0.95rem; padding:1.02rem 1.65rem; color:#94a3b8; text-decoration:none; transition:0.15s; }
+
+        #sidebar a span, #sidebar a { min-width:0; }
+        #sidebar a { line-height:1.25; }
         #sidebar a:hover, #sidebar a.active { background:var(--gray-100); color:var(--primary); }
         #sidebar .menu-tab { color:var(--menu-color); }
         #sidebar .settings-tab { color:var(--settings-color); }
         #sidebar .about-tab { color:var(--about-color); }
         #sidebar .footer-tab { color:var(--footer-color); }
         #sidebar .menu-tab.active, #sidebar .settings-tab.active, #sidebar .about-tab.active, #sidebar .footer-tab.active { background:var(--gray-100); font-weight:600; }
-        #main { margin-left:var(--sidebar); flex:1; padding:2rem 2.4rem; }
+        #main { margin-left:var(--sidebar); flex:1; padding:2rem 2.4rem; min-width:0; }
         header { background:var(--gray-100); padding:1.2rem 2rem; border-bottom:1px solid var(--gray-200); display:flex; justify-content:space-between; align-items:center; border-radius:10px; margin-bottom:1.8rem; box-shadow:0 4px 14px rgba(0,0,0,0.2); }
         header h1 { font-size:1.6rem; margin:0; }
         .card { background:var(--gray-100); border-radius:10px; box-shadow:0 4px 16px rgba(0,0,0,0.2); padding:1.7rem 2rem; margin-bottom:1.8rem; border:1px solid var(--gray-200); }
@@ -2512,6 +5321,9 @@ function render_editor_tools() {
         .editor-tool-btn { border:1px solid var(--gray-200); background:#1e293b; color:#f8fafc; border-radius:8px; padding:0.7rem 0.85rem; text-align:left; cursor:pointer; font-weight:600; transition:0.15s; }
         .editor-tool-btn:hover { border-color:var(--primary); color:var(--primary); transform:translateY(-1px); }
         .editor-note { margin-top:0.75rem; color:#94a3b8; font-size:0.92rem; line-height:1.5; }
+        .editor-page-presets { border-color:rgba(168,85,247,.42); background:linear-gradient(135deg,rgba(168,85,247,.10),rgba(37,99,235,.08)); }
+        .page-preset-btn { background:#111827; border-color:rgba(168,85,247,.35); }
+        .page-preset-btn:hover { background:#1e1b4b; }
 
         .settings-tabs-card { overflow: visible; }
         .settings-header-row { display:flex; justify-content:space-between; gap:1rem; align-items:flex-start; margin-bottom:1.2rem; }
@@ -2547,10 +5359,616 @@ function render_editor_tools() {
         .chat-bubble.user { background:#1e293b; border:1px solid #334155; align-self:flex-start; }
         .chat-bubble.admin { background:var(--chat-color); color:#052e16; align-self:flex-end; font-weight:600; }
         .chat-time { display:block; margin-top:0.35rem; font-size:0.75rem; opacity:0.68; }
+        .stats-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:1rem;margin-bottom:1.4rem}.stats-card{background:#111827;border:1px solid #334155;border-radius:14px;padding:1.1rem}.stats-card h3{margin:0 0 .5rem;color:#94a3b8;font-size:.95rem}.stats-number{font-size:2rem;font-weight:800;color:#f8fafc}.stats-chart{display:flex;align-items:end;gap:6px;height:190px;padding:1rem;background:#0f172a;border-radius:14px;border:1px solid #334155}.stats-bar{flex:1;min-width:6px;background:linear-gradient(180deg,#38bdf8,#2563eb);border-radius:7px 7px 0 0;position:relative}.stats-bar span{position:absolute;bottom:-24px;left:50%;transform:translateX(-50%);font-size:10px;color:#64748b;white-space:nowrap}.stats-table-small td,.stats-table-small th{padding:.7rem .8rem}.stats-pill{display:inline-flex;padding:.25rem .55rem;border-radius:999px;background:rgba(56,189,248,.12);color:#bae6fd;font-size:.82rem;font-weight:700}
+
+        .nav-section-title{margin:1.25rem 0 .45rem;padding:.35rem .75rem;color:#64748b;font-size:.72rem;font-weight:900;letter-spacing:.08em;text-transform:uppercase;border-top:1px solid rgba(148,163,184,.14);padding-top:.95rem}
+        .nav-section-title:first-of-type{border-top:0;margin-top:.4rem;padding-top:.35rem}
+        .settings-map{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:1rem;margin:1.2rem 0 1.4rem}
+        .settings-map-card{border:1px solid var(--gray-200);border-radius:14px;background:#0f172a;padding:1rem;text-decoration:none;color:#e5e7eb;display:block;transition:.16s}
+        .settings-map-card:hover{transform:translateY(-2px);border-color:var(--settings-color);box-shadow:0 10px 25px rgba(0,0,0,.18)}
+        .settings-map-card strong{display:flex;align-items:center;gap:.55rem;color:#fff;margin-bottom:.35rem}
+        .settings-map-card span{display:block;color:#94a3b8;font-size:.88rem;line-height:1.45}
+        .settings-tabs{position:sticky;top:0;z-index:5;background:rgba(2,6,23,.92);backdrop-filter:blur(10px);border:1px solid var(--gray-200);border-radius:14px;padding:.7rem;margin-bottom:1.2rem}
+        .settings-tab-group-label{width:100%;color:#64748b;font-size:.72rem;font-weight:900;text-transform:uppercase;letter-spacing:.08em;margin:.15rem .25rem .2rem}
+        .settings-box h4{margin:0 0 .75rem;color:#e2e8f0}
+
+        /* SpiderCMS – czytelniejszy układ ustawień */
+        .settings-clean-intro{display:grid;grid-template-columns:1.15fr .85fr;gap:1rem;margin:1.2rem 0 1.5rem;align-items:stretch}
+        .settings-clean-card{border:1px solid var(--gray-200);border-radius:16px;background:linear-gradient(135deg,rgba(15,23,42,.92),rgba(30,41,59,.72));padding:1.15rem;box-shadow:0 10px 26px rgba(0,0,0,.14)}
+        .settings-clean-card h3{margin:0 0 .45rem;color:#f8fafc;display:flex;gap:.55rem;align-items:center}
+        .settings-clean-card p{margin:.2rem 0;color:#94a3b8;line-height:1.55;font-size:.94rem}
+        .settings-clean-list{display:grid;gap:.55rem;margin-top:.9rem}
+        .settings-clean-list a{display:flex;align-items:center;justify-content:space-between;gap:.75rem;text-decoration:none;color:#e2e8f0;background:#0f172a;border:1px solid #334155;border-radius:12px;padding:.72rem .85rem;font-weight:700}
+        .settings-clean-list a:hover{border-color:var(--settings-color);color:#fff}
+        .settings-clean-list small{color:#94a3b8;font-weight:600}
+        .settings-tabs{display:grid!important;grid-template-columns:repeat(auto-fit,minmax(185px,1fr));gap:.55rem;position:relative!important;top:auto!important;background:rgba(15,23,42,.76)!important;backdrop-filter:none!important;padding:1rem!important}
+        .settings-tab-group-label{grid-column:1/-1;margin:.6rem 0 .15rem!important;padding:.65rem .2rem .15rem;border-top:1px solid rgba(148,163,184,.15)}
+        .settings-tab-group-label:first-child{border-top:0;margin-top:0!important;padding-top:.1rem!important}
+        .settings-tab-btn{justify-content:flex-start!important;min-height:48px;text-align:left}
+        .settings-panel{padding:1.6rem!important}
+        .settings-panel-title{background:#0f172a;border:1px solid #334155;border-radius:14px;padding:1rem 1.1rem!important;margin-bottom:1.35rem!important}
+        .settings-panel-title h3{font-size:1.22rem!important}
+        .settings-box{border:1px solid #334155!important;background:rgba(15,23,42,.78)!important;border-radius:14px!important;margin-bottom:1.05rem!important}
+        .settings-mini-title{margin:1.35rem 0 .75rem!important;padding:.55rem .75rem;border-left:4px solid var(--settings-color);background:rgba(96,165,250,.08);border-radius:10px;color:#dbeafe!important;font-weight:900!important}
+        .settings-actions-bottom{position:sticky;bottom:0;background:linear-gradient(180deg,rgba(2,6,23,0),rgba(2,6,23,.94) 25%);padding-top:1rem;margin-top:1.3rem;z-index:4}
+        .settings-actions-bottom button{box-shadow:0 12px 30px rgba(0,0,0,.28)}
+        @media(max-width:980px){.settings-clean-intro{grid-template-columns:1fr}.settings-tabs{grid-template-columns:1fr!important}.settings-actions-bottom{position:static;background:transparent}}
+
+
+
+        /* SpiderCMS – prosty, zwarty układ Ustawień Witryny */
+        .settings-clean-intro{display:none!important}
+        .settings-tabs-card{background:rgba(15,23,42,.78)!important;border-radius:18px!important;padding:1.1rem!important}
+        .settings-header-row{display:flex!important;align-items:center!important;justify-content:space-between!important;gap:1rem!important;margin-bottom:1rem!important;border-bottom:1px solid rgba(148,163,184,.18)!important;padding-bottom:.9rem!important}
+        .settings-header-row h2{font-size:1.35rem!important;margin:0!important}
+        .settings-header-row p{font-size:.92rem!important;line-height:1.45!important;max-width:760px!important}
+        .settings-tabs{display:flex!important;flex-wrap:wrap!important;gap:.5rem!important;background:#0f172a!important;border:1px solid #334155!important;border-radius:14px!important;padding:.65rem!important;margin:0 0 1rem!important;position:static!important;top:auto!important}
+        .settings-tab-group-label{display:none!important}
+        .settings-tab-btn{width:auto!important;min-height:0!important;padding:.68rem .85rem!important;border-radius:10px!important;background:rgba(30,41,59,.9)!important;border:1px solid #334155!important;font-size:.9rem!important;line-height:1.15!important;justify-content:center!important;gap:.45rem!important;flex:0 0 auto!important}
+        .settings-tab-btn.active{background:linear-gradient(135deg,var(--settings-color),#7c3aed)!important;border-color:transparent!important;color:#fff!important}
+        .settings-panel{padding:0!important;background:transparent!important;border:0!important}
+        .settings-panel-title{padding:.8rem .95rem!important;margin:0 0 .8rem!important;border-radius:12px!important;background:#111827!important;border:1px solid #334155!important}
+        .settings-panel-title h3{font-size:1.05rem!important;margin:0 0 .2rem!important}
+        .settings-panel-title p{font-size:.88rem!important;margin:0!important;color:#94a3b8!important}
+        .settings-box{padding:1rem!important;margin-bottom:.8rem!important;border-radius:12px!important;background:rgba(15,23,42,.72)!important;border:1px solid #334155!important}
+        .settings-mini-title{margin:1rem 0 .6rem!important;padding:.55rem .75rem!important;border-radius:10px!important;font-size:.95rem!important}
+        .settings-responsive-grid{grid-template-columns:repeat(auto-fit,minmax(240px,1fr))!important}
+        .settings-actions-bottom{position:static!important;background:transparent!important;padding-top:.6rem!important;margin-top:.8rem!important}
+        .settings-actions-bottom button,.settings-panel button{border-radius:10px!important}
+
+        /* SpiderCMS – uporządkowana zakładka Chat */
+        .chat-settings-wrap{display:grid;grid-template-columns:repeat(12,1fr);gap:1rem;margin-top:1rem}
+        .chat-settings-card{grid-column:span 6;background:#0f172a;border:1px solid #334155;border-radius:14px;padding:1rem}
+        .chat-settings-card.wide{grid-column:span 12}
+        .chat-settings-card h3{margin:0 0 .8rem;color:#e2e8f0;font-size:1rem;display:flex;align-items:center;gap:.5rem}
+        .chat-settings-card .mini-help{color:#94a3b8;font-size:.86rem;line-height:1.45;margin:.15rem 0 .8rem}
+        .chat-fields-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:.85rem;align-items:end}
+        .chat-check{display:flex!important;align-items:center!important;gap:.65rem!important;margin:0!important;padding:.75rem .8rem;border:1px solid #334155;border-radius:12px;background:rgba(2,6,23,.35)}
+        .chat-check input{width:auto!important;transform:scale(1.18)}
+        .chat-actions{display:flex;gap:.65rem;flex-wrap:wrap;margin-top:1rem}
+        .chat-actions button{border-radius:10px!important}
+        .chat-layout{align-items:start!important}
+        .chat-layout>.card,.chat-layout+.card,.chat-layout .card{border-radius:16px!important}
+        @media(max-width:980px){.chat-settings-card{grid-column:span 12}.settings-header-row{align-items:flex-start!important;flex-direction:column!important}.settings-tab-btn{flex:1 1 calc(50% - .5rem)!important}}
+        @media(max-width:560px){.settings-tab-btn{flex:1 1 100%!important}.chat-fields-grid{grid-template-columns:1fr!important}}
+
         @media (max-width: 980px) { .chat-layout { grid-template-columns:1fr; } }
-    </style>
+
+        /* SpiderCMS – system logów */
+        .logs-toolbar{display:flex;gap:.75rem;flex-wrap:wrap;align-items:end;margin-bottom:1rem;background:#0f172a;border:1px solid #334155;border-radius:14px;padding:1rem}
+        .logs-toolbar .field{min-width:180px;flex:1}
+        .logs-table-wrap{overflow:auto;border:1px solid #334155;border-radius:14px;background:#0f172a}
+        .logs-table{width:100%;border-collapse:collapse;min-width:980px}
+        .logs-table th,.logs-table td{padding:.85rem;border-bottom:1px solid #1f2937;text-align:left;vertical-align:top;font-size:.92rem}
+        .logs-table th{background:#111827;color:#cbd5e1;position:sticky;top:0;z-index:1}
+        .logs-table tr:hover td{background:rgba(168,85,247,.06)}
+        .log-badge{display:inline-flex;align-items:center;justify-content:center;border-radius:999px;padding:.25rem .55rem;font-size:.75rem;font-weight:900;white-space:nowrap}
+        .log-badge.success{background:rgba(34,197,94,.15);color:#86efac;border:1px solid rgba(34,197,94,.28)}
+        .log-badge.error{background:rgba(239,68,68,.15);color:#fecaca;border:1px solid rgba(239,68,68,.28)}
+        .log-badge.warning{background:rgba(245,158,11,.15);color:#fde68a;border:1px solid rgba(245,158,11,.28)}
+        .log-badge.info{background:rgba(56,189,248,.12);color:#bae6fd;border:1px solid rgba(56,189,248,.25)}
+        .log-context{max-width:360px;color:#94a3b8;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.78rem;white-space:pre-wrap;word-break:break-word}
+        .log-small{color:#64748b;font-size:.78rem;line-height:1.35}
+    
+
+        /* SpiderCMS – bezpieczna responsywność panelu administracyjnego */
+        .spidercms-mobile-topbar{display:none;}
+        .spidercms-sidebar-backdrop{display:none;}
+
+        @media (max-width: 1024px){
+            :root{ --sidebar: 300px; }
+            body{ overflow-x:hidden; }
+            .spidercms-mobile-topbar{
+                display:flex;
+                position:sticky;
+                top:0;
+                z-index:1200;
+                align-items:center;
+                justify-content:space-between;
+                gap:.8rem;
+                padding:.85rem 1rem;
+                background:#0f172a;
+                border-bottom:1px solid #334155;
+                box-shadow:0 10px 24px rgba(0,0,0,.22);
+            }
+            .spidercms-mobile-brand{display:flex;align-items:center;gap:.65rem;font-weight:900;color:#f8fafc;}
+            .spidercms-mobile-brand img{height:34px;width:auto;border-radius:6px;}
+            .spidercms-mobile-menu-btn{
+                display:inline-flex;
+                align-items:center;
+                justify-content:center;
+                gap:.45rem;
+                border:1px solid #334155;
+                background:#111827;
+                color:#f8fafc;
+                border-radius:12px;
+                padding:.68rem .9rem;
+                font-weight:800;
+                cursor:pointer;
+            }
+            #sidebar{
+                position:fixed;
+                top:0;
+                left:0;
+                bottom:0;
+                width:min(86vw, 320px);
+                transform:translateX(-105%);
+                transition:transform .22s ease;
+                z-index:1300;
+                box-shadow:18px 0 50px rgba(0,0,0,.45);
+            }
+            body.spidercms-sidebar-open #sidebar{ transform:translateX(0); }
+            .spidercms-sidebar-backdrop{
+                display:none;
+                position:fixed;
+                inset:0;
+                z-index:1250;
+                background:rgba(2,6,23,.68);
+                backdrop-filter:blur(2px);
+            }
+            body.spidercms-sidebar-open .spidercms-sidebar-backdrop{ display:block; }
+            #main{ margin-left:0!important; padding:1rem!important; }
+            header{ flex-direction:column; align-items:flex-start; gap:.85rem; padding:1rem!important; }
+            header h1{ font-size:1.25rem!important; }
+            .card{ padding:1rem!important; border-radius:14px!important; }
+            .dashboard-grid,.stats-grid,.settings-map,.settings-grid,.editor-tool-grid{ grid-template-columns:1fr!important; }
+            .settings-header-row{ flex-direction:column!important; align-items:flex-start!important; }
+            .settings-tabs{ overflow-x:auto!important; flex-wrap:nowrap!important; scrollbar-width:thin; }
+            .settings-tab-btn{ white-space:nowrap!important; flex:0 0 auto!important; }
+            .settings-panel{ min-height:0!important; }
+            .chat-layout,.settings-clean-intro{ grid-template-columns:1fr!important; }
+            .chat-settings-card{ grid-column:span 12!important; }
+            .menu-row,.submenu-row{ grid-template-columns:1fr!important; }
+            table{ min-width:760px; }
+            .logs-table{ min-width:980px; }
+            .table-wrap,.logs-table-wrap{ overflow-x:auto; }
+            input[type="text"],input[type="password"],input[type="email"],input[type="number"],input[type="url"],select,textarea,.input-field{ max-width:100%; }
+            .btn,button[type="submit"]{ white-space:normal; }
+        }
+
+        @media (max-width: 560px){
+            .spidercms-mobile-topbar{ padding:.7rem .8rem; }
+            .spidercms-mobile-menu-btn span{ display:none; }
+            #main{ padding:.75rem!important; }
+            .card{ margin-bottom:1rem!important; }
+            th,td{ padding:.7rem .75rem!important; }
+            .toast{ left:.75rem!important; right:.75rem!important; top:.75rem!important; }
+            .dash-number,.stats-number{ font-size:2rem!important; }
+            .logs-toolbar{ display:grid!important; grid-template-columns:1fr!important; }
+        }
+
+
+/* SPIDERCMS MOBILE HARD FIX START */
+:root{
+    --spidercms-mobile-sidebar-width: min(330px, 88vw);
+}
+
+.spidercms-mobile-topbar,
+.spidercms-mobile-backdrop{
+    display:none;
+}
+
+@media (max-width: 1024px){
+    html,
+    body{
+        width:100%!important;
+        max-width:100%!important;
+        overflow-x:hidden!important;
+    }
+
+    body{
+        min-width:0!important;
+    }
+
+    .spidercms-mobile-topbar{
+        display:flex!important;
+        position:fixed!important;
+        top:0!important;
+        left:0!important;
+        right:0!important;
+        height:58px!important;
+        z-index:2147483000!important;
+        align-items:center!important;
+        gap:10px!important;
+        padding:8px 12px!important;
+        background:linear-gradient(135deg,#0f172a,#1e293b)!important;
+        color:#fff!important;
+        box-shadow:0 10px 30px rgba(0,0,0,.28)!important;
+    }
+
+    .spidercms-mobile-btn{
+        width:42px!important;
+        height:42px!important;
+        min-width:42px!important;
+        border:0!important;
+        border-radius:13px!important;
+        background:linear-gradient(135deg,#a855f7,#2563eb)!important;
+        color:#fff!important;
+        font-size:24px!important;
+        line-height:1!important;
+        font-weight:900!important;
+        display:flex!important;
+        align-items:center!important;
+        justify-content:center!important;
+        cursor:pointer!important;
+        padding:0!important;
+        margin:0!important;
+    }
+
+    .spidercms-mobile-title{
+        font-size:15px!important;
+        font-weight:800!important;
+        white-space:nowrap!important;
+        overflow:hidden!important;
+        text-overflow:ellipsis!important;
+    }
+
+    .spidercms-mobile-backdrop{
+        position:fixed!important;
+        inset:0!important;
+        background:rgba(2,6,23,.66)!important;
+        z-index:2147482990!important;
+    }
+
+    body.spidercms-menu-open .spidercms-mobile-backdrop{
+        display:block!important;
+    }
+
+    /* Najczęstsze wrappery panelu */
+    .layout,
+    .admin-layout,
+    .panel-layout,
+    .dashboard-layout,
+    .app-layout,
+    body > .layout,
+    body > .admin-layout{
+        display:block!important;
+        grid-template-columns:1fr!important;
+        width:100%!important;
+        max-width:100%!important;
+        min-width:0!important;
+        margin:0!important;
+    }
+
+    /* Lewy sidebar */
+    .sidebar,
+    aside.sidebar,
+    .admin-sidebar,
+    .side-menu,
+    nav.sidebar{
+        position:fixed!important;
+        top:0!important;
+        left:0!important;
+        bottom:0!important;
+        width:var(--spidercms-mobile-sidebar-width)!important;
+        max-width:88vw!important;
+        min-width:0!important;
+        height:100vh!important;
+        max-height:100vh!important;
+        z-index:2147482999!important;
+        transform:translateX(-110%)!important;
+        transition:transform .24s ease!important;
+        overflow-y:auto!important;
+        overflow-x:hidden!important;
+        overscroll-behavior:contain!important;
+        padding-top:74px!important;
+        box-shadow:24px 0 80px rgba(0,0,0,.42)!important;
+    }
+
+    body.spidercms-menu-open .sidebar,
+    body.spidercms-menu-open aside.sidebar,
+    body.spidercms-menu-open .admin-sidebar,
+    body.spidercms-menu-open .side-menu,
+    body.spidercms-menu-open nav.sidebar{
+        transform:translateX(0)!important;
+    }
+
+    .sidebar *,
+    aside.sidebar *,
+    .admin-sidebar *,
+    .side-menu *{
+        max-width:100%!important;
+    }
+
+    .nav,
+    .sidebar nav,
+    aside.sidebar nav{
+        display:flex!important;
+        flex-direction:column!important;
+        gap:8px!important;
+    }
+
+    .nav a,
+    .sidebar a,
+    aside.sidebar a{
+        white-space:normal!important;
+        word-break:break-word!important;
+    }
+
+    /* Główna treść */
+    .main,
+    main.main,
+    .admin-main,
+    .content,
+    .admin-content,
+    .panel-content,
+    .page-content,
+    .workspace,
+    section.main{
+        width:100%!important;
+        max-width:100%!important;
+        min-width:0!important;
+        margin:0!important;
+        margin-left:0!important;
+        padding:74px 12px 24px!important;
+        overflow-x:hidden!important;
+        box-sizing:border-box!important;
+    }
+
+    /* Nagłówki/karty */
+    .topbar,
+    .admin-topbar,
+    .page-head,
+    .page-header,
+    .section-head,
+    .toolbar{
+        display:flex!important;
+        flex-direction:column!important;
+        align-items:stretch!important;
+        justify-content:flex-start!important;
+        gap:12px!important;
+        width:100%!important;
+        max-width:100%!important;
+    }
+
+    h1{
+        font-size:clamp(1.35rem, 7vw, 2rem)!important;
+        line-height:1.15!important;
+        overflow-wrap:anywhere!important;
+    }
+
+    h2{
+        font-size:clamp(1.15rem, 5.5vw, 1.55rem)!important;
+        line-height:1.2!important;
+    }
+
+    .grid,
+    .settings-grid,
+    .cards-grid,
+    .dashboard-grid,
+    .stats-grid,
+    .form-grid,
+    .two-col,
+    .three-col,
+    .columns{
+        display:grid!important;
+        grid-template-columns:1fr!important;
+        gap:14px!important;
+        width:100%!important;
+        max-width:100%!important;
+        min-width:0!important;
+    }
+
+    .card,
+    .box,
+    .panel,
+    .panel-card,
+    .settings-card,
+    .module-card,
+    .stat-card,
+    .card.half,
+    .card.third,
+    .card.two,
+    .card.three{
+        grid-column:1 / -1!important;
+        width:100%!important;
+        max-width:100%!important;
+        min-width:0!important;
+        margin-left:0!important;
+        margin-right:0!important;
+        padding:15px!important;
+        border-radius:18px!important;
+        box-sizing:border-box!important;
+        overflow:hidden!important;
+    }
+
+    /* Formularze */
+    form,
+    fieldset,
+    .form-row,
+    .form-group,
+    .input-group,
+    .settings-row{
+        width:100%!important;
+        max-width:100%!important;
+        min-width:0!important;
+        box-sizing:border-box!important;
+    }
+
+    label{
+        max-width:100%!important;
+        overflow-wrap:anywhere!important;
+    }
+
+    input,
+    select,
+    textarea{
+        width:100%!important;
+        max-width:100%!important;
+        min-width:0!important;
+        box-sizing:border-box!important;
+    }
+
+    textarea{
+        min-height:150px!important;
+    }
+
+    .actions,
+    .btn-row,
+    .form-actions,
+    .button-row,
+    .toolbar-actions{
+        display:flex!important;
+        flex-wrap:wrap!important;
+        align-items:stretch!important;
+        gap:8px!important;
+        width:100%!important;
+        max-width:100%!important;
+    }
+
+    .btn,
+    button,
+    input[type="submit"],
+    .button{
+        max-width:100%!important;
+        white-space:normal!important;
+        overflow-wrap:anywhere!important;
+    }
+
+    /* Tabele jako poziomo przewijane */
+    table{
+        display:block!important;
+        width:100%!important;
+        max-width:100%!important;
+        overflow-x:auto!important;
+        -webkit-overflow-scrolling:touch!important;
+        white-space:nowrap!important;
+        border-collapse:separate!important;
+    }
+
+    thead,
+    tbody,
+    tr{
+        width:100%!important;
+    }
+
+    th,
+    td{
+        white-space:nowrap!important;
+    }
+
+    /* Edytor TinyMCE */
+    .tox,
+    .tox-tinymce,
+    .tox-editor-container,
+    .tox-sidebar-wrap,
+    .tox-edit-area{
+        max-width:100%!important;
+        width:100%!important;
+        min-width:0!important;
+        box-sizing:border-box!important;
+    }
+
+    .tox-toolbar,
+    .tox-toolbar__primary,
+    .tox-toolbar__overflow{
+        flex-wrap:wrap!important;
+    }
+
+    /* Media, menu, slider */
+    img,
+    video,
+    iframe{
+        max-width:100%!important;
+        height:auto;
+    }
+
+    .menu-row,
+    .submenu-row,
+    .slider-row,
+    .media-row,
+    .log-row,
+    .preset-row{
+        display:grid!important;
+        grid-template-columns:1fr!important;
+        gap:10px!important;
+        width:100%!important;
+        max-width:100%!important;
+    }
+
+    .media-grid,
+    .gallery-grid,
+    .uploads-grid,
+    .preset-grid{
+        display:grid!important;
+        grid-template-columns:repeat(2, minmax(0, 1fr))!important;
+        gap:10px!important;
+    }
+}
+
+@media (max-width: 560px){
+    .main,
+    main.main,
+    .admin-main,
+    .content,
+    .admin-content,
+    .panel-content,
+    .page-content,
+    .workspace,
+    section.main{
+        padding-left:9px!important;
+        padding-right:9px!important;
+    }
+
+    .card,
+    .box,
+    .panel,
+    .panel-card,
+    .settings-card,
+    .module-card,
+    .stat-card{
+        padding:12px!important;
+        border-radius:15px!important;
+    }
+
+    .actions .btn,
+    .actions button,
+    .form-actions .btn,
+    .form-actions button,
+    .btn-row .btn,
+    .btn-row button{
+        width:100%!important;
+        justify-content:center!important;
+        text-align:center!important;
+    }
+
+    .media-grid,
+    .gallery-grid,
+    .uploads-grid,
+    .preset-grid{
+        grid-template-columns:1fr!important;
+    }
+}
+/* SPIDERCMS MOBILE HARD FIX END */
+
+
+
+/* SPIDERCMS LIVE BUTTON FIX START */
+.spidercms-live-edit-btn{
+    background:linear-gradient(135deg,#14b8a6,#06b6d4)!important;
+    color:#fff!important;
+}
+.spidercms-live-edit-btn:hover{
+    filter:brightness(1.08);
+    transform:translateY(-1px);
+}
+/* SPIDERCMS LIVE BUTTON FIX END */
+
+</style>
 </head>
 <body>
+<div class="spidercms-mobile-topbar">
+    <button type="button" class="spidercms-mobile-menu-btn" id="spidercmsMobileMenuBtn" aria-label="Otwórz menu" aria-expanded="false">
+        <i class="fa-solid fa-bars"></i> <span>Menu</span>
+    </button>
+    <div class="spidercms-mobile-brand">
+        <?php if ($logo_url): ?>
+            <img src="<?= htmlspecialchars($logo_url) ?>" alt="Logo">
+        <?php endif; ?>
+        <span>SpiderCMS</span>
+    </div>
+</div>
+<div class="spidercms-sidebar-backdrop" id="spidercmsSidebarBackdrop"></div>
 <aside id="sidebar">
     <div id="sidebar-header">
         <?php if ($logo_url): ?>
@@ -2559,14 +5977,28 @@ function render_editor_tools() {
         SpiderCMS
     </div>
     <nav>
+        <div class="nav-section-title">Podgląd</div>
         <a href="/" target="_blank"><i class="fa-solid fa-arrow-up-right-from-square"></i> Strona główna</a>
+
+        <div class="nav-section-title">Treść</div>
         <a href="admin.php?tab=dashboard" class="<?= $tab === 'dashboard' ? 'active' : '' ?>"><i class="fa-solid fa-gauge"></i> Dashboard</a>
-        <a href="admin.php?tab=strony" class="<?= $tab === 'strony' ? 'active' : '' ?>"><i class="fa-solid fa-house"></i> Strony</a>
-        <a href="admin.php?tab=menu" class="<?= $tab === 'menu' ? 'active menu-tab' : 'menu-tab' ?>"><i class="fa-solid fa-bars"></i> Menu</a>
+        <a href="admin.php?tab=strony" class="<?= $tab === 'strony' ? 'active' : '' ?>"><i class="fa-solid fa-file-lines"></i> Strony i edytor</a>
+        <a href="admin.php?tab=media" class="<?= $tab === 'media' ? 'active' : '' ?>" style="color:#34d399;"><i class="fa-solid fa-images"></i> Biblioteka mediów</a>
+        <a href="admin.php?tab=slider" class="<?= $tab === 'slider' ? 'active' : '' ?>" style="color:#fbbf24;"><i class="fa-solid fa-sliders"></i> Slider zdjęć</a>
+
+        <div class="nav-section-title">Wygląd strony</div>
+        <a href="admin.php?tab=menu" class="<?= $tab === 'menu' ? 'active menu-tab' : 'menu-tab' ?>"><i class="fa-solid fa-bars"></i> Menu i podmenu</a>
         <a href="admin.php?tab=stopka" class="<?= $tab === 'stopka' ? 'active footer-tab' : 'footer-tab' ?>"><i class="fa-solid fa-shoe-prints"></i> Stopka</a>
-		<a href="admin.php?tab=media" class="<?= $tab === 'media' ? 'active' : '' ?>" style="color:#34d399;"><i class="fa-solid fa-images"></i> Media</a>
+        <a href="admin.php?tab=ustawienia&settings=general" class="<?= $tab === 'ustawienia' ? 'active settings-tab' : 'settings-tab' ?>"><i class="fa-solid fa-gear"></i> Ustawienia globalne</a>
+
+        <div class="nav-section-title">Komunikacja</div>
         <a href="admin.php?tab=chat" class="<?= $tab === 'chat' ? 'active' : '' ?>" style="color:#22c55e;"><i class="fa-solid fa-comments"></i> Chat <?php if (($chat_unread ?? 0) > 0): ?><span class="chat-unread-badge"><?= (int)$chat_unread ?></span><?php endif; ?></a>
-        <a href="admin.php?tab=ustawienia" class="<?= $tab === 'ustawienia' ? 'active settings-tab' : 'settings-tab' ?>"><i class="fa-solid fa-gear"></i> Ustawienia</a>
+        <a href="admin.php?tab=ustawienia&settings=social" class="<?= ($tab === 'ustawienia' && ($_GET['settings'] ?? '') === 'social') ? 'active settings-tab' : 'settings-tab' ?>"><i class="fa-solid fa-share-nodes"></i> Social Media</a>
+
+        <div class="nav-section-title">Analityka i system</div>
+        <a href="admin.php?tab=statystyki" class="<?= $tab === 'statystyki' ? 'active' : '' ?>" style="color:#38bdf8;"><i class="fa-solid fa-chart-line"></i> Statystyki</a>
+        <a href="admin.php?tab=logi" class="<?= $tab === 'logi' ? 'active' : '' ?>" style="color:#f97316;"><i class="fa-solid fa-list-check"></i> Logi akcji</a>
+        <a href="admin.php?tab=ustawienia&settings=security" class="<?= ($tab === 'ustawienia' && ($_GET['settings'] ?? '') === 'security') ? 'active settings-tab' : 'settings-tab' ?>"><i class="fa-solid fa-shield-halved"></i> Bezpieczeństwo</a>
         <a href="admin.php?tab=o-cms" class="<?= $tab === 'o-cms' ? 'active about-tab' : 'about-tab' ?>"><i class="fa-solid fa-info-circle"></i> O CMS</a>
         <a href="?logout=1"><i class="fa-solid fa-right-from-bracket"></i> Wyloguj</a>
     </nav>
@@ -2581,6 +6013,9 @@ function render_editor_tools() {
                 case 'stopka': echo 'Konfiguracja stopki witryny'; break;
                 case 'ustawienia': echo 'Ustawienia witryny'; break;
                 case 'chat': echo 'Chat z odwiedzającymi'; break;
+                case 'slider': echo 'Slider zdjęć i shortcode'; break;
+                case 'statystyki': echo 'Statystyki odwiedzin'; break;
+                case 'logi': echo 'Logi akcji systemu'; break;
                 case 'o-cms': echo 'O tym CMS-ie'; break;
                 default: echo 'Zarządzanie stronami';
             }
@@ -2703,6 +6138,149 @@ function render_editor_tools() {
                 <div style="margin-top:2rem;"><button type="submit">Zapisz ustawienia stopki</button></div>
             </form>
         </div>
+
+    <?php elseif ($tab === 'slider'): ?>
+        <?php
+        $slider_form = $edit_slider ?: [
+            'id' => '', 'name' => '', 'style' => 'modern', 'fit_mode' => 'contain', 'height' => 420, 'autoplay' => '1', 'interval' => 4500,
+            'arrows' => '1', 'dots' => '1', 'overlay' => '1', 'radius' => 18, 'images' => []
+        ];
+        ?>
+        <div class="card">
+            <h2 style="color:#fbbf24;"><i class="fa-solid fa-sliders"></i> Generator slidera ze zdjęć</h2>
+            <p style="color:#94a3b8;margin-top:.25rem;">Utwórz stylowy slider, zapisz go i wklej shortcode w treści strony, np. <code>[slider id="hero"]</code>.</p>
+            <form method="post" id="slider-form" style="margin-top:1.25rem;">
+                <?= csrf_field() ?>
+                <input type="hidden" name="action" value="save_slider">
+                <input type="hidden" name="old_slider_id" value="<?= htmlspecialchars($slider_form['id'] ?? '') ?>">
+                <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:1rem;">
+                    <div>
+                        <label>Nazwa slidera</label>
+                        <input type="text" name="name" value="<?= htmlspecialchars($slider_form['name'] ?? '') ?>" placeholder="np. Slider główny" required>
+                    </div>
+                    <div>
+                        <label>ID / shortcode</label>
+                        <input type="text" name="id" value="<?= htmlspecialchars($slider_form['id'] ?? '') ?>" placeholder="np. hero" required>
+                        <small style="color:#94a3b8;">Użycie: <code>[slider id="<?= htmlspecialchars($slider_form['id'] ?: 'hero') ?>"]</code></small>
+                    </div>
+                    <div>
+                        <label>Styl</label>
+                        <select name="style">
+                            <?php foreach (['modern'=>'Nowoczesny','glass'=>'Glass','minimal'=>'Minimalny','dark'=>'Ciemny','cards'=>'Karty'] as $k=>$v): ?>
+                                <option value="<?= $k ?>" <?= (($slider_form['style'] ?? 'modern') === $k) ? 'selected' : '' ?>><?= $v ?></option>
+                            <?php endforeach; ?>
+                        </select>
+                    </div>
+                    <div>
+                        <label>Dopasowanie zdjęć</label>
+                        <select name="fit_mode">
+                            <?php foreach (['contain'=>'Dopasuj całe zdjęcie bez rozciągania','cover'=>'Wypełnij kadr, przytnij brzegi','auto'=>'Oryginalny rozmiar, maksymalnie do okna'] as $k=>$v): ?>
+                                <option value="<?= $k ?>" <?= (($slider_form['fit_mode'] ?? 'contain') === $k) ? 'selected' : '' ?>><?= $v ?></option>
+                            <?php endforeach; ?>
+                        </select>
+                        <small style="color:#94a3b8;display:block;margin-top:.25rem;">Tryb „Dopasuj” jest najlepszy dla małych obrazów i różnych proporcji zdjęć.</small>
+                    </div>
+                    <div>
+                        <label>Wysokość slidera [px]</label>
+                        <input type="number" name="height" min="180" max="900" value="<?= (int)($slider_form['height'] ?? 420) ?>">
+                    </div>
+                    <div>
+                        <label>Zaokrąglenie [px]</label>
+                        <input type="number" name="radius" min="0" max="40" value="<?= (int)($slider_form['radius'] ?? 18) ?>">
+                    </div>
+                    <div>
+                        <label>Czas slajdu [ms]</label>
+                        <input type="number" name="interval" min="1500" max="20000" step="500" value="<?= (int)($slider_form['interval'] ?? 4500) ?>">
+                    </div>
+                </div>
+                <div style="display:flex;gap:1rem;flex-wrap:wrap;margin:1rem 0;">
+                    <label style="display:flex;align-items:center;gap:.5rem;"><input type="checkbox" name="autoplay" value="1" <?= (($slider_form['autoplay'] ?? '1') === '1') ? 'checked' : '' ?>> Autoplay</label>
+                    <label style="display:flex;align-items:center;gap:.5rem;"><input type="checkbox" name="arrows" value="1" <?= (($slider_form['arrows'] ?? '1') === '1') ? 'checked' : '' ?>> Strzałki</label>
+                    <label style="display:flex;align-items:center;gap:.5rem;"><input type="checkbox" name="dots" value="1" <?= (($slider_form['dots'] ?? '1') === '1') ? 'checked' : '' ?>> Kropki</label>
+                    <label style="display:flex;align-items:center;gap:.5rem;"><input type="checkbox" name="overlay" value="1" <?= (($slider_form['overlay'] ?? '1') === '1') ? 'checked' : '' ?>> Ciemny gradient pod tekstem</label>
+                </div>
+                <h3 style="margin-top:1.5rem;">Zdjęcia w sliderze</h3>
+                <?php
+                $slider_gallery_images = array_values(array_filter($media_files ?? [], function($f) {
+                    return isset($f['ext']) && in_array(strtolower((string)$f['ext']), ['jpg','jpeg','png','gif','webp','svg'], true);
+                }));
+                ?>
+                <div style="margin:.75rem 0 1rem;padding:1rem;border:1px solid #334155;border-radius:12px;background:#0f172a;">
+                    <div style="display:flex;justify-content:space-between;gap:1rem;align-items:center;flex-wrap:wrap;margin-bottom:.8rem;">
+                        <div>
+                            <strong style="color:#f8fafc;">Wybierz zdjęcie z galerii</strong>
+                            <div style="color:#94a3b8;font-size:.9rem;margin-top:.2rem;">Kliknij miniaturę albo przycisk „Dodaj”, aby dopisać zdjęcie do slidera.</div>
+                        </div>
+                        <a href="admin.php?tab=media" style="color:#93c5fd;text-decoration:none;font-weight:700;">Przejdź do biblioteki mediów</a>
+                    </div>
+                    <?php if (empty($slider_gallery_images)): ?>
+                        <p style="color:#94a3b8;margin:0;">Brak obrazów w galerii. Najpierw wgraj zdjęcia w zakładce <strong>Media</strong>.</p>
+                    <?php else: ?>
+                        <div class="slider-gallery-picker" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:.75rem;max-height:330px;overflow:auto;padding-right:.25rem;">
+                            <?php foreach ($slider_gallery_images as $gf): ?>
+                                <button type="button" class="slider-gallery-add" data-url="<?= htmlspecialchars($gf['url'] ?? '', ENT_QUOTES, 'UTF-8') ?>" title="Dodaj <?= htmlspecialchars($gf['name'] ?? '', ENT_QUOTES, 'UTF-8') ?>" style="border:1px solid #334155;background:#1e293b;color:#e5e7eb;border-radius:10px;padding:.45rem;cursor:pointer;text-align:left;overflow:hidden;">
+                                    <img src="<?= htmlspecialchars($gf['url'] ?? '', ENT_QUOTES, 'UTF-8') ?>" alt="<?= htmlspecialchars($gf['name'] ?? '', ENT_QUOTES, 'UTF-8') ?>" style="width:100%;height:82px;object-fit:cover;border-radius:7px;display:block;margin-bottom:.45rem;">
+                                    <span style="display:block;font-size:.78rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;"><?= htmlspecialchars($gf['name'] ?? '', ENT_QUOTES, 'UTF-8') ?></span>
+                                    <span style="display:inline-flex;margin-top:.35rem;background:#2563eb;color:white;border-radius:999px;padding:.2rem .5rem;font-size:.75rem;font-weight:800;">+ Dodaj</span>
+                                </button>
+                            <?php endforeach; ?>
+                        </div>
+                    <?php endif; ?>
+                </div>
+                <div id="slider-images-list" style="display:grid;gap:.9rem;">
+                    <?php $imgs = $slider_form['images'] ?? []; if (empty($imgs)) $imgs = [['url'=>'','title'=>'','desc'=>'']]; ?>
+                    <?php foreach ($imgs as $img): ?>
+                        <div class="slider-image-row" style="display:grid;grid-template-columns:1.2fr 1fr 1fr auto;gap:.7rem;align-items:end;background:#1e293b;border:1px solid #334155;border-radius:12px;padding:1rem;">
+                            <div><label>Adres zdjęcia</label><input type="text" name="image_url[]" value="<?= htmlspecialchars($img['url'] ?? '') ?>" placeholder="uploads/zdjecie.jpg"></div>
+                            <div><label>Tytuł</label><input type="text" name="image_title[]" value="<?= htmlspecialchars($img['title'] ?? '') ?>" placeholder="Opcjonalnie"></div>
+                            <div><label>Opis</label><input type="text" name="image_desc[]" value="<?= htmlspecialchars($img['desc'] ?? '') ?>" placeholder="Opcjonalnie"></div>
+                            <button type="button" class="remove-slider-image" style="background:#ef4444;color:white;border:0;border-radius:8px;padding:.75rem;cursor:pointer;"><i class="fa-solid fa-trash"></i></button>
+                        </div>
+                    <?php endforeach; ?>
+                </div>
+                <div style="display:flex;gap:.75rem;flex-wrap:wrap;margin-top:1rem;">
+                    <button type="button" id="add-slider-image" style="background:#334155;"><i class="fa-solid fa-plus"></i> Dodaj zdjęcie</button>
+                    <button type="submit"><i class="fa-solid fa-save"></i> Zapisz slider</button>
+                    <?php if (!empty($slider_form['id'])): ?>
+                        <button type="button" onclick="copyUrl('[slider id=&quot;<?= htmlspecialchars($slider_form['id']) ?>&quot;]')" style="background:#2563eb;"><i class="fa-solid fa-copy"></i> Kopiuj shortcode</button>
+                    <?php endif; ?>
+                </div>
+            </form>
+        </div>
+
+        <div class="card" style="margin-top:1.25rem;">
+            <h2>Utworzone slidery</h2>
+            <?php if (empty($sliders)): ?>
+                <p style="color:#94a3b8;">Nie utworzono jeszcze żadnego slidera.</p>
+            <?php else: ?>
+                <div style="overflow:auto;">
+                    <table style="width:100%;border-collapse:collapse;">
+                        <thead><tr><th>Nazwa</th><th>Shortcode</th><th>Zdjęcia</th><th>Styl</th><th>Akcje</th></tr></thead>
+                        <tbody>
+                            <?php foreach ($sliders as $sid => $sl): ?>
+                                <tr>
+                                    <td><?= htmlspecialchars($sl['name'] ?? $sid) ?></td>
+                                    <td><code>[slider id="<?= htmlspecialchars($sid) ?>"]</code></td>
+                                    <td><?= count($sl['images'] ?? []) ?></td>
+                                    <td><?= htmlspecialchars($sl['style'] ?? 'modern') ?></td>
+                                    <td style="display:flex;gap:.45rem;flex-wrap:wrap;">
+                                        <a href="admin.php?tab=slider&edit_slider=<?= urlencode($sid) ?>" style="background:#2563eb;color:white;padding:.45rem .7rem;border-radius:6px;text-decoration:none;">Edytuj</a>
+                                        <button type="button" onclick="copyUrl('[slider id=&quot;<?= htmlspecialchars($sid) ?>&quot;]')" style="background:#334155;color:white;border:0;padding:.45rem .7rem;border-radius:6px;">Kopiuj</button>
+                                        <form method="post" onsubmit="return confirm('Usunąć slider?');" style="display:inline;">
+                                            <?= csrf_field() ?>
+                                            <input type="hidden" name="action" value="delete_slider">
+                                            <input type="hidden" name="slider_id" value="<?= htmlspecialchars($sid) ?>">
+                                            <button type="submit" style="background:#ef4444;color:white;border:0;padding:.45rem .7rem;border-radius:6px;">Usuń</button>
+                                        </form>
+                                    </td>
+                                </tr>
+                            <?php endforeach; ?>
+                        </tbody>
+                    </table>
+                </div>
+            <?php endif; ?>
+        </div>
+
 	<?php elseif ($tab === 'media'): ?>
     <div class="card">
         <h2 style="color:#34d399;"><i class="fa-solid fa-images"></i> Biblioteka Mediów (<?= count($media_files) ?> plików)</h2>
@@ -2756,21 +6334,98 @@ function render_editor_tools() {
         }
         $selected_chat = $selected_chat_id && isset($chat_conversations[$selected_chat_id]) ? $chat_conversations[$selected_chat_id] : null;
         ?>
-        <div class="card">
-            <h2 style="color:var(--chat-color);"><i class="fa-solid fa-comments"></i> Chat z odwiedzającymi</h2>
-            <p style="color:#94a3b8;margin:0.6rem 0 1.2rem;">Widget czatu pojawia się na publicznych podstronach. Rozmowy aktywne są w <code>.chat/conversations.json</code>, a pełna historia każdej wiadomości jest dopisywana do <code>.chat/archive.jsonl</code>.</p>
-            <form method="post" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:1rem;align-items:end;margin-bottom:1.4rem;">
+        <div class="card chat-admin-card">
+            <div style="display:flex;justify-content:space-between;gap:1rem;align-items:flex-start;flex-wrap:wrap;">
+                <div>
+                    <h2 style="color:var(--chat-color);margin-top:0;"><i class="fa-solid fa-comments"></i> Chat z odwiedzającymi</h2>
+                    <p style="color:#94a3b8;margin:0.4rem 0 0;max-width:860px;line-height:1.55;">Ustawienia czatu zostały podzielone na proste sekcje: widoczność, teksty widżetu, powiadomienia e-mail oraz SMTP dla home.pl.</p>
+                </div>
+                <span style="background:rgba(34,197,94,.12);border:1px solid rgba(34,197,94,.35);color:#bbf7d0;border-radius:999px;padding:.55rem .8rem;font-weight:800;">
+                    <?= !empty($chat_settings['enabled']) ? 'Chat włączony' : 'Chat wyłączony' ?>
+                </span>
+            </div>
+
+            <form method="post" class="chat-settings-form">
+                <?= csrf_field() ?>
                 <input type="hidden" name="action" value="save_chat_settings">
-                <label style="display:flex;align-items:center;gap:0.7rem;margin:0;">
-                    <input type="checkbox" name="chat_enabled" <?= !empty($chat_settings['enabled']) ? 'checked' : '' ?> style="width:auto;transform:scale(1.25);">
-                    <strong>Włącz chat na stronie</strong>
-                </label>
-                <div><label style="margin-top:0;">Tytuł</label><input type="text" name="chat_title" value="<?= htmlspecialchars($chat_settings['title'] ?? '') ?>"></div>
-                <div><label style="margin-top:0;">Podtytuł</label><input type="text" name="chat_subtitle" value="<?= htmlspecialchars($chat_settings['subtitle'] ?? '') ?>"></div>
-                <div><label style="margin-top:0;">Tekst przycisku</label><input type="text" name="chat_button_text" value="<?= htmlspecialchars($chat_settings['button_text'] ?? '') ?>"></div>
-                <div><label style="margin-top:0;">Nazwa administratora</label><input type="text" name="chat_admin_name" value="<?= htmlspecialchars($chat_settings['admin_name'] ?? '') ?>"></div>
-                <div style="grid-column:1/-1;"><label>Wiadomość powitalna</label><input type="text" name="chat_welcome" value="<?= htmlspecialchars($chat_settings['welcome'] ?? '') ?>"></div>
-                <div><button type="submit"><i class="fa-solid fa-save"></i> Zapisz ustawienia czatu</button></div>
+
+                <div class="chat-settings-wrap">
+                    <section class="chat-settings-card">
+                        <h3><i class="fa-solid fa-toggle-on"></i> Status czatu</h3>
+                        <p class="mini-help">Włącz lub wyłącz widżet czatu na publicznych stronach.</p>
+                        <label class="chat-check">
+                            <input type="checkbox" name="chat_enabled" <?= !empty($chat_settings['enabled']) ? 'checked' : '' ?>>
+                            <strong>Włącz chat na stronie</strong>
+                        </label>
+                    </section>
+
+                    <section class="chat-settings-card">
+                        <h3><i class="fa-solid fa-user-shield"></i> Administrator</h3>
+                        <p class="mini-help">Nazwa widoczna przy odpowiedziach administratora.</p>
+                        <div class="chat-fields-grid">
+                            <div>
+                                <label style="margin-top:0;">Nazwa administratora</label>
+                                <input type="text" name="chat_admin_name" value="<?= htmlspecialchars($chat_settings['admin_name'] ?? '') ?>">
+                            </div>
+                        </div>
+                    </section>
+
+                    <section class="chat-settings-card wide">
+                        <h3><i class="fa-solid fa-message"></i> Treść widżetu</h3>
+                        <p class="mini-help">Teksty widoczne dla odwiedzającego w oknie czatu.</p>
+                        <div class="chat-fields-grid">
+                            <div><label style="margin-top:0;">Tytuł</label><input type="text" name="chat_title" value="<?= htmlspecialchars($chat_settings['title'] ?? '') ?>"></div>
+                            <div><label style="margin-top:0;">Podtytuł</label><input type="text" name="chat_subtitle" value="<?= htmlspecialchars($chat_settings['subtitle'] ?? '') ?>"></div>
+                            <div><label style="margin-top:0;">Tekst przycisku</label><input type="text" name="chat_button_text" value="<?= htmlspecialchars($chat_settings['button_text'] ?? '') ?>"></div>
+                            <div><label style="margin-top:0;">Wiadomość powitalna</label><input type="text" name="chat_welcome" value="<?= htmlspecialchars($chat_settings['welcome'] ?? '') ?>"></div>
+                        </div>
+                    </section>
+
+                    <section class="chat-settings-card wide">
+                        <h3><i class="fa-solid fa-envelope-circle-check"></i> Powiadomienia e-mail</h3>
+                        <p class="mini-help">Wysyłaj powiadomienie, gdy użytkownik napisze nową wiadomość. Na home.pl zalecany jest SMTP.</p>
+                        <div class="chat-fields-grid">
+                            <label class="chat-check">
+                                <input type="checkbox" name="chat_email_notifications" <?= (($chat_settings['email_notifications'] ?? '0') === '1') ? 'checked' : '' ?>>
+                                <strong>Powiadamiaj e-mailem</strong>
+                            </label>
+                            <div><label style="margin-top:0;">E-mail administratora</label><input type="email" name="chat_admin_email" value="<?= htmlspecialchars($chat_settings['admin_email'] ?? '') ?>" placeholder="np. kontakt@twojadomena.pl"></div>
+                            <div><label style="margin-top:0;">E-mail nadawcy / From</label><input type="email" name="chat_from_email" value="<?= htmlspecialchars($chat_settings['from_email'] ?? '') ?>" placeholder="np. kontakt@twojadomena.pl"></div>
+                            <div>
+                                <label style="margin-top:0;">Sposób wysyłki</label>
+                                <select name="chat_mail_method">
+                                    <option value="smtp" <?= (($chat_settings['mail_method'] ?? 'smtp') === 'smtp') ? 'selected' : '' ?>>SMTP, zalecane dla home.pl</option>
+                                    <option value="mail" <?= (($chat_settings['mail_method'] ?? 'smtp') === 'mail') ? 'selected' : '' ?>>PHP mail(), awaryjnie</option>
+                                </select>
+                            </div>
+                        </div>
+                    </section>
+
+                    <section class="chat-settings-card wide">
+                        <h3><i class="fa-solid fa-server"></i> SMTP home.pl / serwer pocztowy</h3>
+                        <p class="mini-help">Login powinien być pełnym adresem skrzynki. Hasło zostaw puste, jeśli nie chcesz go zmieniać.</p>
+                        <div class="chat-fields-grid">
+                            <div><label style="margin-top:0;">SMTP host</label><input type="text" name="chat_smtp_host" value="<?= htmlspecialchars($chat_settings['smtp_host'] ?? '') ?>" placeholder="serwer SMTP z panelu home.pl"></div>
+                            <div><label style="margin-top:0;">SMTP port</label><input type="text" name="chat_smtp_port" value="<?= htmlspecialchars($chat_settings['smtp_port'] ?? '465') ?>" placeholder="465"></div>
+                            <div>
+                                <label style="margin-top:0;">Szyfrowanie SMTP</label>
+                                <select name="chat_smtp_secure">
+                                    <option value="ssl" <?= (($chat_settings['smtp_secure'] ?? 'ssl') === 'ssl') ? 'selected' : '' ?>>SSL, zwykle port 465</option>
+                                    <option value="tls" <?= (($chat_settings['smtp_secure'] ?? 'ssl') === 'tls') ? 'selected' : '' ?>>TLS/STARTTLS, zwykle port 587</option>
+                                    <option value="none" <?= (($chat_settings['smtp_secure'] ?? 'ssl') === 'none') ? 'selected' : '' ?>>Brak szyfrowania</option>
+                                </select>
+                            </div>
+                            <div><label style="margin-top:0;">SMTP login</label><input type="text" name="chat_smtp_username" value="<?= htmlspecialchars($chat_settings['smtp_username'] ?? '') ?>" placeholder="pełny adres e-mail"></div>
+                            <div><label style="margin-top:0;">SMTP hasło</label><input type="password" name="chat_smtp_password" value="" placeholder="zostaw puste, aby nie zmieniać"></div>
+                        </div>
+                        <p class="mini-help" style="margin-top:.8rem;color:#fbbf24;">Wyniki testów i błędy wysyłki zapisują się w <code>.chat/email.log</code>.</p>
+                    </section>
+                </div>
+
+                <div class="chat-actions">
+                    <button type="submit" onclick="this.form.action.value='save_chat_settings'"><i class="fa-solid fa-save"></i> Zapisz ustawienia czatu</button>
+                    <button type="submit" onclick="this.form.action.value='test_chat_email'" style="background:#2563eb;"><i class="fa-solid fa-paper-plane"></i> Wyślij test e-mail</button>
+                </div>
             </form>
         </div>
         <div class="chat-layout">
@@ -2864,24 +6519,119 @@ function render_editor_tools() {
             </div>
         </div>
 
+
+    <?php elseif ($tab === 'statystyki'): ?>
+        <?php $stats = stats_get_summary(); ?>
+        <div class="stats-grid">
+            <div class="stats-card"><h3>Dzisiaj</h3><div class="stats-number"><?= (int)($stats['daily'][$stats['today']] ?? 0) ?></div><span class="stats-pill"><?= (int)$stats['unique_today'] ?> unikalnych</span></div>
+            <div class="stats-card"><h3>Wczoraj</h3><div class="stats-number"><?= (int)($stats['daily'][$stats['yesterday']] ?? 0) ?></div></div>
+            <div class="stats-card"><h3>Ostatnie 7 dni</h3><div class="stats-number"><?= (int)$stats['last7'] ?></div></div>
+            <div class="stats-card"><h3>Ten miesiąc</h3><div class="stats-number"><?= (int)$stats['month'] ?></div></div>
+            <div class="stats-card"><h3>Łącznie</h3><div class="stats-number"><?= (int)$stats['total'] ?></div></div>
+            <div class="stats-card"><h3>Online</h3><div class="stats-number"><?= count($stats['online']) ?></div><span class="stats-pill">ostatnie <?= (int)($stats_settings['online_minutes'] ?? 5) ?> min</span></div>
+        </div>
+
+        <div class="card" style="margin-bottom:1.5rem;">
+            <h2><i class="fa-solid fa-chart-simple"></i> Ostatnie 30 dni</h2>
+            <?php $maxv = max(1, max($stats['last30'] ?: [1])); ?>
+            <div class="stats-chart">
+                <?php foreach ($stats['last30'] as $day => $val): ?>
+                    <div class="stats-bar" title="<?= e($day) ?>: <?= (int)$val ?>" style="height:<?= max(3, round(((int)$val / $maxv) * 100)) ?>%;"><span><?= date('d.m', strtotime($day)) ?></span></div>
+                <?php endforeach; ?>
+            </div>
+        </div>
+
+        <div class="card" style="margin-bottom:1.5rem;">
+            <h2><i class="fa-solid fa-sliders"></i> Ustawienia statystyk</h2>
+            <form method="post" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:1rem;align-items:end;">
+                <?= csrf_field() ?>
+                <input type="hidden" name="action" value="save_stats_settings">
+                <label style="display:flex;gap:.6rem;align-items:center;"><input type="checkbox" name="stats_enabled" <?= ($stats_settings['enabled'] ?? '1') === '1' ? 'checked' : '' ?> style="width:auto;"> Włącz statystyki</label>
+                <label style="display:flex;gap:.6rem;align-items:center;"><input type="checkbox" name="stats_ignore_admin" <?= ($stats_settings['ignore_admin'] ?? '1') === '1' ? 'checked' : '' ?> style="width:auto;"> Nie licz administratora</label>
+                <label style="display:flex;gap:.6rem;align-items:center;"><input type="checkbox" name="stats_ignore_bots" <?= ($stats_settings['ignore_bots'] ?? '1') === '1' ? 'checked' : '' ?> style="width:auto;"> Ignoruj boty</label>
+                <div><label>Limit nabijania / IP + strona (min)</label><input type="number" name="stats_throttle_minutes" value="<?= e($stats_settings['throttle_minutes'] ?? 30) ?>" min="1" max="1440"></div>
+                <div><label>Czas online (min)</label><input type="number" name="stats_online_minutes" value="<?= e($stats_settings['online_minutes'] ?? 5) ?>" min="1" max="60"></div>
+                <button class="btn btn-save" type="submit"><i class="fa-solid fa-save"></i> Zapisz</button>
+            </form>
+            <form method="post" onsubmit="return confirm('Na pewno wyczyścić wszystkie statystyki?');" style="margin-top:1rem;">
+                <?= csrf_field() ?>
+                <input type="hidden" name="action" value="reset_stats">
+                <button class="btn btn-delete" type="submit"><i class="fa-solid fa-trash"></i> Wyczyść statystyki</button>
+            </form>
+        </div>
+
+        <div class="dashboard-grid">
+            <div class="card">
+                <h2>Najpopularniejsze strony</h2>
+                <table class="stats-table-small"><thead><tr><th>Strona</th><th>Wyświetlenia</th><th>Ostatnio</th></tr></thead><tbody>
+                <?php foreach (array_slice($stats['pages'], 0, 20, true) as $path => $row): ?>
+                    <tr><td><strong><?= e($row['title'] ?? $path) ?></strong><br><small style="color:#94a3b8;"><?= e($path) ?></small></td><td><?= (int)($row['views'] ?? 0) ?></td><td><?= e($row['last'] ?? '') ?></td></tr>
+                <?php endforeach; ?>
+                <?php if (empty($stats['pages'])): ?><tr><td colspan="3">Brak danych.</td></tr><?php endif; ?>
+                </tbody></table>
+            </div>
+            <div class="card">
+                <h2>Urządzenia</h2>
+                <table class="stats-table-small"><tbody><?php foreach ($stats['devices'] as $k=>$v): ?><tr><td><?= e($k) ?></td><td><?= (int)$v ?></td></tr><?php endforeach; ?></tbody></table>
+                <h2 style="margin-top:1.5rem;">Przeglądarki</h2>
+                <table class="stats-table-small"><tbody><?php foreach ($stats['browsers'] as $k=>$v): ?><tr><td><?= e($k) ?></td><td><?= (int)$v ?></td></tr><?php endforeach; ?></tbody></table>
+            </div>
+            <div class="card">
+                <h2>Źródła wejść</h2>
+                <table class="stats-table-small"><tbody><?php foreach (array_slice($stats['refs'],0,20,true) as $k=>$v): ?><tr><td><?= e($k) ?></td><td><?= (int)$v ?></td></tr><?php endforeach; ?><?php if(empty($stats['refs'])): ?><tr><td>Brak danych.</td><td>0</td></tr><?php endif; ?></tbody></table>
+            </div>
+            <div class="card">
+                <h2>Aktywni użytkownicy online</h2>
+                <table class="stats-table-small"><thead><tr><th>Strona</th><th>Aktywność</th></tr></thead><tbody>
+                <?php foreach ($stats['online'] as $row): ?><tr><td><?= e($row['title'] ?? $row['path'] ?? '') ?><br><small style="color:#94a3b8;"><?= e($row['path'] ?? '') ?></small></td><td><?= date('H:i:s', (int)($row['time'] ?? time())) ?></td></tr><?php endforeach; ?>
+                <?php if(empty($stats['online'])): ?><tr><td colspan="2">Brak aktywnych użytkowników.</td></tr><?php endif; ?>
+                </tbody></table>
+            </div>
+        </div>
+
     <?php elseif ($tab === 'ustawienia'): ?>
         <div class="card card-settings settings-tabs-card">
             <div class="settings-header-row">
                 <div>
                     <h2 style="margin-top:0; color:var(--settings-color);"><i class="fa-solid fa-gear" style="margin-right:0.6rem;"></i> Ustawienia witryny</h2>
-                    <p style="color:#94a3b8;margin:0.4rem 0 0;">Ustawienia zostały podzielone na podzakładki, aby nie trzeba było przewijać jednej długiej strony.</p>
+                    <p style="color:#94a3b8;margin:0.4rem 0 0;">Ustawienia są pogrupowane według zastosowania: podstawowe, wygląd, nagłówek/treść, integracje i system.</p>
                 </div>
-                <button type="button" class="settings-save-floating" onclick="document.getElementById('settings-main-form').requestSubmit();"><i class="fa-solid fa-floppy-disk"></i> Zapisz ustawienia</button>
+                <span class="settings-save-floating" style="cursor:default;background:#0f172a;border:1px solid #334155;"><i class="fa-solid fa-circle-info"></i> Zapisuj w aktywnej sekcji</span>
+            </div>
+
+            <div class="settings-clean-intro">
+                <div class="settings-clean-card">
+                    <h3><i class="fa-solid fa-layer-group"></i> Ustawienia uporządkowane według zastosowania</h3>
+                    <p>Najpierw ustaw podstawy witryny, potem wygląd, nagłówek, treść, a na końcu integracje i bezpieczeństwo. Duże moduły, takie jak Menu, Stopka, Chat i Statystyki, mają własne zakładki w lewym menu.</p>
+                    <div class="settings-clean-list">
+                        <a href="admin.php?tab=menu"><span><i class="fa-solid fa-bars"></i> Menu i podmenu</span><small>osobna zakładka</small></a>
+                        <a href="admin.php?tab=stopka"><span><i class="fa-solid fa-shoe-prints"></i> Stopka</span><small>osobna zakładka</small></a>
+                        <a href="admin.php?tab=chat"><span><i class="fa-solid fa-comments"></i> Chat i SMTP</span><small>osobna zakładka</small></a>
+                        <a href="admin.php?tab=statystyki"><span><i class="fa-solid fa-chart-line"></i> Statystyki</span><small>osobna zakładka</small></a>
+                    </div>
+                </div>
+                <div class="settings-clean-card">
+                    <h3><i class="fa-solid fa-circle-info"></i> Co jest w tej zakładce?</h3>
+                    <p>Ta sekcja zawiera tylko ustawienia globalne: nazwa strony, strona główna, folder stron, kolory, logo, szerokość treści, nagłówek, social media, eksport oraz hasło administratora.</p>
+                    <p style="color:#fbbf24;"><strong>Uwaga:</strong> przyciski zapisu są na dole każdej sekcji, żeby nie mieszać ustawień z różnych modułów.</p>
+                </div>
             </div>
 
             <div class="settings-tabs" role="tablist" aria-label="Podzakładki ustawień SpiderCMS">
-                <button type="button" class="settings-tab-btn active" data-settings-tab="general"><i class="fa-solid fa-sliders"></i> Ogólne</button>
-                <button type="button" class="settings-tab-btn" data-settings-tab="appearance"><i class="fa-solid fa-palette"></i> Wygląd</button>
-                <button type="button" class="settings-tab-btn" data-settings-tab="layout"><i class="fa-solid fa-ruler-combined"></i> Układ</button>
-                <button type="button" class="settings-tab-btn" data-settings-tab="media-logo"><i class="fa-solid fa-image"></i> Logo</button>
+                <div class="settings-tab-group-label">1. Podstawowe</div>
+                <button type="button" class="settings-tab-btn active" data-settings-tab="general"><i class="fa-solid fa-sliders"></i> Ogólne i strona główna</button>
+
+                <div class="settings-tab-group-label">2. Wygląd witryny</div>
+                <button type="button" class="settings-tab-btn" data-settings-tab="appearance"><i class="fa-solid fa-palette"></i> Kolory i motyw</button>
+                <button type="button" class="settings-tab-btn" data-settings-tab="media-logo"><i class="fa-solid fa-image"></i> Logo / ikona</button>
+                <button type="button" class="settings-tab-btn" data-settings-tab="layout"><i class="fa-solid fa-ruler-combined"></i> Nagłówek i szerokość treści</button>
+
+                <div class="settings-tab-group-label">3. Integracje</div>
                 <button type="button" class="settings-tab-btn" data-settings-tab="social"><i class="fa-solid fa-share-nodes"></i> Social Media</button>
-                <button type="button" class="settings-tab-btn" data-settings-tab="security"><i class="fa-solid fa-shield-halved"></i> Bezpieczeństwo</button>
-                <button type="button" class="settings-tab-btn" data-settings-tab="advanced"><i class="fa-solid fa-screwdriver-wrench"></i> Zaawansowane</button>
+
+                <div class="settings-tab-group-label">4. System</div>
+                <button type="button" class="settings-tab-btn" data-settings-tab="security"><i class="fa-solid fa-shield-halved"></i> Bezpieczeństwo / hasło</button>
+                <button type="button" class="settings-tab-btn" data-settings-tab="advanced"><i class="fa-solid fa-screwdriver-wrench"></i> Eksport i zaawansowane</button>
             </div>
 
             <form id="settings-main-form" method="post" enctype="multipart/form-data">
@@ -2889,7 +6639,7 @@ function render_editor_tools() {
 
                 <section class="settings-panel active" data-settings-panel="general">
                     <div class="settings-panel-title">
-                        <h3><i class="fa-solid fa-sliders"></i> Ustawienia ogólne</h3>
+                        <h3><i class="fa-solid fa-sliders"></i> Podstawowe ustawienia witryny</h3>
                         <p>Nazwa witryny, strona główna i folder dla nowych podstron.</p>
                     </div>
 
@@ -2942,8 +6692,21 @@ function render_editor_tools() {
 
                 <section class="settings-panel" data-settings-panel="appearance">
                     <div class="settings-panel-title">
-                        <h3><i class="fa-solid fa-palette"></i> Wygląd i kolory</h3>
+                        <h3><i class="fa-solid fa-palette"></i> Kolory i motyw strony</h3>
                         <p>Kolory globalne, tło strony, linki, przyciski, nagłówek i stopka.</p>
+                    </div>
+
+                    <div class="settings-box" style="border-color:rgba(168,85,247,.35);background:linear-gradient(135deg,rgba(168,85,247,.10),rgba(37,99,235,.08));">
+                        <h3 style="margin:0 0 .6rem;color:#f8fafc;"><i class="fa-solid fa-wand-magic-sparkles"></i> Gotowe presety strony</h3>
+                        <p style="color:#cbd5e1;margin:0 0 1rem;line-height:1.55;">Wybierz gotowy styl, aby jednym kliknięciem ustawić kolory, szerokość treści, wysokość nagłówka, logo, zaokrąglenia i podstawowy styl nazwy witryny. Nie usuwa to stron ani treści.</p>
+                        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:.8rem;">
+                            <button type="submit" name="site_preset" value="minimal" onclick="this.form.querySelector('input[name=\'action\']').value='apply_site_preset'" style="background:#fff;color:#111827;border:1px solid #e5e7eb;text-align:left;padding:1rem;border-radius:14px;"><strong>Minimal jasny</strong><br><small>czysty, prosty, czytelny</small></button>
+                            <button type="submit" name="site_preset" value="corporate" onclick="this.form.querySelector('input[name=\'action\']').value='apply_site_preset'" style="background:#1e40af;color:#fff;text-align:left;padding:1rem;border-radius:14px;"><strong>Corporate</strong><br><small>firma, usługi, oferta</small></button>
+                            <button type="submit" name="site_preset" value="dark" onclick="this.form.querySelector('input[name=\'action\']').value='apply_site_preset'" style="background:#020617;color:#e5e7eb;border:1px solid #334155;text-align:left;padding:1rem;border-radius:14px;"><strong>Dark premium</strong><br><small>ciemny i elegancki</small></button>
+                            <button type="submit" name="site_preset" value="glass" onclick="this.form.querySelector('input[name=\'action\']').value='apply_site_preset'" style="background:linear-gradient(135deg,#eef2ff,#fff);color:#312e81;text-align:left;padding:1rem;border-radius:14px;"><strong>Glass</strong><br><small>nowoczesny, lekki</small></button>
+                            <button type="submit" name="site_preset" value="landing" onclick="this.form.querySelector('input[name=\'action\']').value='apply_site_preset'" style="background:#fff7ed;color:#9a3412;text-align:left;padding:1rem;border-radius:14px;"><strong>Landing</strong><br><small>sprzedaż i CTA</small></button>
+                            <button type="submit" name="site_preset" value="neon" onclick="this.form.querySelector('input[name=\'action\']').value='apply_site_preset'" style="background:linear-gradient(135deg,#111827,#581c87);color:#fff;text-align:left;padding:1rem;border-radius:14px;"><strong>Neon</strong><br><small>styl SpiderCMS</small></button>
+                        </div>
                     </div>
 
                     <div class="settings-mini-title">Główne kolory</div>
@@ -2981,7 +6744,7 @@ function render_editor_tools() {
 
                 <section class="settings-panel" data-settings-panel="layout">
                     <div class="settings-panel-title">
-                        <h3><i class="fa-solid fa-ruler-combined"></i> Układ i styl komponentów</h3>
+                        <h3><i class="fa-solid fa-ruler-combined"></i> Nagłówek, menu i szerokość treści</h3>
                         <p>Czcionka, wysokość nagłówka, rozmiar logo, szerokość treści i zaokrąglenia.</p>
                     </div>
                     <div class="settings-grid">
@@ -2989,17 +6752,52 @@ function render_editor_tools() {
                         <div><label for="header_height">Wysokość nagłówka [px]</label><input type="text" id="header_height" name="header_height" value="<?= htmlspecialchars(theme_value('header-height', '74')) ?>"></div>
                         <div><label for="logo_height">Maks. wysokość logo [px]</label><input type="text" id="logo_height" name="logo_height" value="<?= htmlspecialchars(theme_value('logo-height', '100')) ?>"></div>
                         <div><label for="menu_position">Pozycja menu</label><select id="menu_position" name="menu_position"><option value="right" <?= theme_value('menu-position', 'right') === 'right' ? 'selected' : '' ?>>Po prawej</option><option value="center" <?= theme_value('menu-position', 'right') === 'center' ? 'selected' : '' ?>>Na środku</option><option value="left" <?= theme_value('menu-position', 'right') === 'left' ? 'selected' : '' ?>>Po lewej</option></select></div>
-                        <div><label for="content_width">Szerokość treści [px]</label><input type="text" id="content_width" name="content_width" value="<?= htmlspecialchars(theme_value('content-width', '1240')) ?>"></div>
+                        <div style="grid-column:span 2;">
+                            <label for="content_width">Szerokość treści strony [px]</label>
+                            <input type="text" id="content_width" name="content_width" value="<?= htmlspecialchars(theme_value('content-width', '1240')) ?>" placeholder="np. 960, 1100, 1240, 1440">
+                            <p style="color:#94a3b8;font-size:0.9rem;margin-top:0.5rem;line-height:1.55;">
+                                Ta wartość ustawia maksymalną szerokość głównej treści strony. Na telefonach treść nadal dopasuje się do ekranu.
+                            </p>
+                        </div>
+                        <div>
+                            <label for="content_width_preset">Szybki wybór szerokości</label>
+                            <select id="content_width_preset">
+                                <option value="">Wybierz preset...</option>
+                                <option value="960">Wąska – 960 px</option>
+                                <option value="1100">Czytelna – 1100 px</option>
+                                <option value="1240">Standardowa – 1240 px</option>
+                                <option value="1440">Szeroka – 1440 px</option>
+                                <option value="1600">Bardzo szeroka – 1600 px</option>
+                            </select>
+                        </div>
                         <div><label for="border_radius">Zaokrąglenia [px]</label><input type="text" id="border_radius" name="border_radius" value="<?= htmlspecialchars(theme_value('border-radius', '10')) ?>"></div>
                         <div><label style="display:flex;align-items:center;gap:0.8rem;margin-top:2.1rem;"><input type="checkbox" name="shadow_enabled" <?= theme_value('shadow-enabled', '1') === '1' ? 'checked' : '' ?> style="width:auto;transform:scale(1.2);"> Cień nagłówka</label></div>
                         <div><label style="display:flex;align-items:center;gap:0.8rem;margin-top:2.1rem;"><input type="checkbox" name="header_enabled" value="1" <?= (($settings['header_enabled'] ?? '1') === '1') ? 'checked' : '' ?> style="width:auto;transform:scale(1.2);"> Pokaż systemowy nagłówek</label><p style="color:#94a3b8;font-size:0.9rem;margin-top:0.5rem;">Po odznaczeniu nie będzie ładowany obecny header.php, czyli zniknie cały domyślny nagłówek z logo i menu. Gdy opcja jest włączona, nagłówek zostaje dokładnie w poprzednim stylu.</p></div>
+                        <div><label style="display:flex;align-items:center;gap:0.8rem;margin-top:2.1rem;"><input type="checkbox" name="show_site_name_in_header" value="1" <?= (($settings['show_site_name_in_header'] ?? '0') === '1') ? 'checked' : '' ?> style="width:auto;transform:scale(1.2);"> Pokaż nazwę witryny obok logo</label><p style="color:#94a3b8;font-size:0.9rem;margin-top:0.5rem;">Nazwa jest pobierana z pola „Nazwa witryny” i wyświetlana zaraz obok ikony/logo w nagłówku.</p></div>
+                    </div>
+
+                    <div class="settings-panel-title" style="margin-top:1.25rem;">
+                        <h3><i class="fa-solid fa-font"></i> Styl nazwy witryny w nagłówku</h3>
+                        <p>Te opcje działają, gdy włączysz wyświetlanie nazwy witryny obok logo.</p>
+                    </div>
+                    <div class="settings-grid">
+                        <div><label for="header_title_font_size">Rozmiar tekstu [px]</label><input type="text" id="header_title_font_size" name="header_title_font_size" value="<?= htmlspecialchars($settings['header_title_font_size'] ?? '22') ?>" placeholder="np. 22"></div>
+                        <div><label for="header_title_font_weight">Grubość tekstu</label><select id="header_title_font_weight" name="header_title_font_weight"><option value="400" <?= (($settings['header_title_font_weight'] ?? '800') === '400') ? 'selected' : '' ?>>Normalna 400</option><option value="500" <?= (($settings['header_title_font_weight'] ?? '800') === '500') ? 'selected' : '' ?>>Średnia 500</option><option value="600" <?= (($settings['header_title_font_weight'] ?? '800') === '600') ? 'selected' : '' ?>>Półgruba 600</option><option value="700" <?= (($settings['header_title_font_weight'] ?? '800') === '700') ? 'selected' : '' ?>>Gruba 700</option><option value="800" <?= (($settings['header_title_font_weight'] ?? '800') === '800') ? 'selected' : '' ?>>Bardzo gruba 800</option><option value="900" <?= (($settings['header_title_font_weight'] ?? '800') === '900') ? 'selected' : '' ?>>Maksymalna 900</option></select></div>
+                        <div><label for="header_title_color">Kolor tekstu</label><input type="text" id="header_title_color" name="header_title_color" value="<?= htmlspecialchars($settings['header_title_color'] ?? '') ?>" placeholder="puste = kolor nagłówka, np. #111827"></div>
+                        <div><label for="header_title_gap">Odstęp od logo [px]</label><input type="text" id="header_title_gap" name="header_title_gap" value="<?= htmlspecialchars($settings['header_title_gap'] ?? '10') ?>" placeholder="np. 10"></div>
+                        <div><label for="header_title_bg">Tło napisu</label><input type="text" id="header_title_bg" name="header_title_bg" value="<?= htmlspecialchars($settings['header_title_bg'] ?? '') ?>" placeholder="puste = bez tła, np. rgba(0,0,0,.05)"></div>
+                        <div><label for="header_title_radius">Zaokrąglenie tła [px]</label><input type="text" id="header_title_radius" name="header_title_radius" value="<?= htmlspecialchars($settings['header_title_radius'] ?? '0') ?>" placeholder="np. 8"></div>
+                        <div><label style="display:flex;align-items:center;gap:0.8rem;margin-top:2.1rem;"><input type="checkbox" name="header_title_uppercase" value="1" <?= (($settings['header_title_uppercase'] ?? '0') === '1') ? 'checked' : '' ?> style="width:auto;transform:scale(1.2);"> Wielkie litery</label></div>
+                        <div><label style="display:flex;align-items:center;gap:0.8rem;margin-top:2.1rem;"><input type="checkbox" name="header_title_italic" value="1" <?= (($settings['header_title_italic'] ?? '0') === '1') ? 'checked' : '' ?> style="width:auto;transform:scale(1.2);"> Kursywa</label></div>
+                        <div><label style="display:flex;align-items:center;gap:0.8rem;margin-top:2.1rem;"><input type="checkbox" name="header_title_shadow" value="1" <?= (($settings['header_title_shadow'] ?? '0') === '1') ? 'checked' : '' ?> style="width:auto;transform:scale(1.2);"> Cień tekstu</label></div>
+                        <div style="display:flex;align-items:center;gap:.8rem;padding:1rem;border:1px solid #334155;border-radius:12px;background:#0f172a;"><span style="width:34px;height:34px;border-radius:10px;background:linear-gradient(135deg,#a855f7,#2563eb);display:inline-block;"></span><strong id="headerTitlePreview" style="font-size:<?= htmlspecialchars($settings['header_title_font_size'] ?? '22') ?>px;font-weight:<?= htmlspecialchars($settings['header_title_font_weight'] ?? '800') ?>;color:<?= htmlspecialchars(($settings['header_title_color'] ?? '') ?: '#f8fafc') ?>;">Podgląd nazwy</strong></div>
                     </div>
                     <div class="settings-actions-bottom"><button type="submit"><i class="fa-solid fa-floppy-disk"></i> Zapisz układ</button></div>
                 </section>
 
                 <section class="settings-panel" data-settings-panel="media-logo">
                     <div class="settings-panel-title">
-                        <h3><i class="fa-solid fa-image"></i> Logo witryny</h3>
+                        <h3><i class="fa-solid fa-image"></i> Logo i ikona nagłówka</h3>
                         <p>Prześlij nowe logo albo podaj bezpośredni adres URL do grafiki.</p>
                     </div>
                     <div class="settings-box">
@@ -3162,6 +6960,107 @@ function render_editor_tools() {
                 <div style="margin-top:2.5rem;"><button type="submit"><i class="fa-solid fa-save"></i> Zapisz menu</button></div>
             </form>
         </div>
+    <?php elseif ($tab === 'logi'): ?>
+        <div class="card">
+            <h2><i class="fa-solid fa-list-check"></i> Logi akcji administratora</h2>
+            <p style="color:#94a3b8;margin-top:-.4rem;">Rejestruje logowanie, edycję stron, menu, ustawień, czatu, mediów, presetów, statystyk i inne akcje panelu.</p>
+
+            <form method="get" class="logs-toolbar">
+                <input type="hidden" name="tab" value="logi">
+                <div class="field">
+                    <label>Akcja</label>
+                    <select name="log_action">
+                        <option value="">Wszystkie akcje</option>
+                        <?php foreach ($log_actions_available as $la => $ll): ?>
+                            <option value="<?= e($la) ?>" <?= $log_filter_action === $la ? 'selected' : '' ?>><?= e($ll) ?> (<?= e($la) ?>)</option>
+                        <?php endforeach; ?>
+                    </select>
+                </div>
+                <div class="field">
+                    <label>Status</label>
+                    <select name="log_status">
+                        <option value="">Wszystkie statusy</option>
+                        <option value="success" <?= $log_filter_status === 'success' ? 'selected' : '' ?>>OK</option>
+                        <option value="error" <?= $log_filter_status === 'error' ? 'selected' : '' ?>>Błąd</option>
+                        <option value="warning" <?= $log_filter_status === 'warning' ? 'selected' : '' ?>>Uwaga</option>
+                        <option value="info" <?= $log_filter_status === 'info' ? 'selected' : '' ?>>Info</option>
+                    </select>
+                </div>
+                <div class="field">
+                    <label>Od daty</label>
+                    <input type="date" name="date_from" value="<?= e($_GET['date_from'] ?? '') ?>">
+                </div>
+                <div class="field">
+                    <label>Do daty</label>
+                    <input type="date" name="date_to" value="<?= e($_GET['date_to'] ?? '') ?>">
+                </div>
+                <button class="btn btn-edit" type="submit"><i class="fa-solid fa-filter"></i> Filtruj</button>
+                <a class="btn btn-view" href="admin.php?tab=logi"><i class="fa-solid fa-rotate-left"></i> Reset</a>
+            </form>
+
+            <div class="logs-toolbar" style="align-items:center;">
+                <strong style="margin-right:auto;"><i class="fa-solid fa-file-export"></i> Eksport logów</strong>
+                <?php
+                    $export_query = [
+                        'tab'=>'logi',
+                        'export_logs'=>'1',
+                        'log_action'=>$log_filter_action,
+                        'log_status'=>$log_filter_status,
+                        'date_from'=>$_GET['date_from'] ?? '',
+                        'date_to'=>$_GET['date_to'] ?? ''
+                    ];
+                ?>
+                <a class="btn btn-export" href="admin.php?<?= e(http_build_query(array_merge($export_query, ['format'=>'csv']))) ?>"><i class="fa-solid fa-file-csv"></i> CSV</a>
+                <a class="btn btn-export" href="admin.php?<?= e(http_build_query(array_merge($export_query, ['format'=>'json']))) ?>"><i class="fa-solid fa-code"></i> JSON</a>
+                <a class="btn btn-export" href="admin.php?<?= e(http_build_query(array_merge($export_query, ['format'=>'txt']))) ?>"><i class="fa-solid fa-file-lines"></i> TXT</a>
+                <a class="btn btn-export" href="admin.php?<?= e(http_build_query(array_merge($export_query, ['format'=>'zip']))) ?>"><i class="fa-solid fa-file-zipper"></i> ZIP</a>
+            </div>
+
+            <form method="post" onsubmit="return confirm('Wyczyścić wszystkie logi?');" style="margin-bottom:1rem;">
+                <?= csrf_field() ?>
+                <input type="hidden" name="action" value="clear_action_logs">
+                <button class="btn btn-delete" type="submit"><i class="fa-solid fa-trash"></i> Wyczyść logi</button>
+            </form>
+
+            <div class="logs-table-wrap">
+                <table class="logs-table">
+                    <thead>
+                        <tr>
+                            <th>Czas</th>
+                            <th>Status</th>
+                            <th>Akcja</th>
+                            <th>IP / URL</th>
+                            <th>Szczegóły</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <?php if (empty($action_logs)): ?>
+                            <tr><td colspan="5" style="color:#94a3b8;text-align:center;padding:2rem;">Brak logów do wyświetlenia.</td></tr>
+                        <?php else: ?>
+                            <?php foreach ($action_logs as $log): ?>
+                                <tr>
+                                    <td>
+                                        <strong><?= e($log['time'] ?? '') ?></strong>
+                                        <div class="log-small"><?= e($log['method'] ?? '') ?></div>
+                                    </td>
+                                    <td><?= spidercms_log_status_badge($log['status'] ?? 'info') ?></td>
+                                    <td>
+                                        <strong><?= e($log['label'] ?? spidercms_log_label($log['action'] ?? '')) ?></strong>
+                                        <div class="log-small"><?= e($log['action'] ?? '') ?></div>
+                                    </td>
+                                    <td>
+                                        <div><?= e($log['ip'] ?? '') ?></div>
+                                        <div class="log-small"><?= e($log['url'] ?? '') ?></div>
+                                    </td>
+                                    <td><div class="log-context"><?= e(json_encode($log['context'] ?? [], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT)) ?></div></td>
+                                </tr>
+                            <?php endforeach; ?>
+                        <?php endif; ?>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
     <?php elseif ($tab === 'o-cms'): ?>
         <?php
             $cms_version = '1.4 Social & Chat Edition';
@@ -3303,6 +7202,11 @@ function render_editor_tools() {
                     <td><a href="<?= htmlspecialchars(ACTIVE_PAGES_URL . $page['slug'] . '.php') ?>" target="_blank" class="btn btn-view"><i class="fa-solid fa-eye"></i> Podgląd</a></td>
                     <td>
                         <a href="admin.php?tab=strony&edit=<?= urlencode($page['slug']) ?>" class="btn btn-edit"><i class="fa-solid fa-pen-to-square"></i> Edytuj</a>
+                        <form method="post" style="display:inline;">
+                            <input type="hidden" name="action" value="duplicate">
+                            <input type="hidden" name="slug" value="<?= htmlspecialchars($page['slug']) ?>">
+                            <button type="submit" class="btn btn-export"><i class="fa-solid fa-copy"></i> Duplikuj</button>
+                        </form>
                         <?php if ($page['slug'] !== $homepage_slug): ?>
                         <form method="post" style="display:inline;">
                             <input type="hidden" name="action" value="set_homepage">
@@ -3326,14 +7230,37 @@ function render_editor_tools() {
         <?php if ($edit_slug): ?>
         <div class="card">
             <h2>Edycja: <?= htmlspecialchars($edit_slug) ?><?php if ($edit_slug === 'index') echo ' <small>(strona główna)</small>'; ?></h2>
+            <?php if (isset($_GET['duplicated'])): ?>
+                <div style="margin:0 0 1rem;padding:0.9rem 1rem;border-radius:10px;background:rgba(34,197,94,.12);border:1px solid rgba(34,197,94,.28);color:#bbf7d0;">
+                    Utworzono kopię strony. Możesz teraz zmienić jej tytuł, slug oraz treść.
+                </div>
+            <?php endif; ?>
+            <?php if (isset($_GET['renamed'])): ?>
+                <div style="margin:0 0 1rem;padding:0.9rem 1rem;border-radius:10px;background:rgba(59,130,246,.12);border:1px solid rgba(59,130,246,.28);color:#bfdbfe;">
+                    Zmieniono nazwę / slug strony.
+                </div>
+            <?php endif; ?>
             <form method="post">
                 <input type="hidden" name="action" value="edit">
-                <input type="hidden" name="slug" value="<?= htmlspecialchars($edit_slug) ?>">
+                <input type="hidden" name="old_slug" value="<?= htmlspecialchars($edit_slug) ?>">
+
+                <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:1rem;margin-bottom:1rem;">
+                    <div>
+                        <label>Tytuł strony</label>
+                        <input type="text" name="title" value="<?= htmlspecialchars($edit_title) ?>" placeholder="np. Oferta">
+                    </div>
+                    <div>
+                        <label>Slug / nazwa pliku</label>
+                        <input type="text" name="new_slug" value="<?= htmlspecialchars($edit_slug) ?>" required pattern="[a-z0-9\-_]+" placeholder="np. oferta">
+                        <p style="color:#94a3b8;margin:0.45rem 0 0;font-size:0.88rem;">Po zapisaniu CMS zmieni nazwę pliku, np. <code>oferta.php</code>.</p>
+                    </div>
+                </div>
+
                 <?php render_editor_tools(); ?>
                 <textarea name="content" class="editor"><?= htmlspecialchars($edit_content) ?></textarea>
                 <div style="margin-top:1.6rem;">
                     <button type="submit"><i class="fa-solid fa-floppy-disk"></i> Zapisz zmiany</button>
-                    <a href="admin.php" style="margin-left:1.2rem;color:#94a3b8;text-decoration:none;">Anuluj</a>
+                    <a href="admin.php?tab=strony" style="margin-left:1.2rem;color:#94a3b8;text-decoration:none;">Anuluj</a>
                 </div>
             </form>
         </div>
@@ -3380,6 +7307,61 @@ document.querySelectorAll('input[type="color"]').forEach(function(input){
         contact: '<section id="kontakt" class="cms-contact"><h2>Kontakt</h2><p><strong>Telefon:</strong> 000 000 000</p><p><strong>Email:</strong> kontakt@example.com</p><p><strong>Adres:</strong> wpisz adres firmy</p></section>',
         separator: '<hr style="margin:2.5rem 0;border:0;border-top:1px solid #e5e7eb;">'
     };
+
+    const pagePresets = {
+        contact: {
+            title: 'Kontakt',
+            slug: 'kontakt',
+            html: '<section class="cms-hero" style="background:linear-gradient(135deg,#f3e8ff,#e0f2fe);"><h1>Kontakt</h1><p>Masz pytania? Skontaktuj się z nami — odpowiemy możliwie szybko.</p><p><a class="cms-btn" href="mailto:kontakt@example.com">Napisz e-mail</a></p></section><section class="cms-columns"><div><h2>Dane kontaktowe</h2><p><strong>Telefon:</strong> 000 000 000</p><p><strong>E-mail:</strong> kontakt@example.com</p><p><strong>Adres:</strong> ul. Przykładowa 1, 00-000 Miasto</p><p><strong>Godziny pracy:</strong> pon.–pt. 8:00–16:00</p></div><div><h2>Napisz do nas</h2><p>Opisz krótko, czego potrzebujesz. Przygotujemy odpowiedź lub ofertę.</p><div class="cms-card"><p><strong>Formularz kontaktowy</strong></p><p>W tym miejscu możesz wkleić własny formularz albo dane kontaktowe.</p></div></div></section><section class="cms-contact"><h2>Jak dojechać?</h2><p>Tutaj możesz dodać mapę Google lub opis lokalizacji.</p></section>'
+        },
+        about: {
+            title: 'O nas',
+            slug: 'o-nas',
+            html: '<section class="cms-hero"><h1>O nas</h1><p>Poznaj naszą firmę, doświadczenie i sposób działania.</p></section><section class="cms-columns"><div><h2>Kim jesteśmy?</h2><p>Jesteśmy zespołem, który stawia na jakość, rzetelność i partnerską współpracę z klientem.</p><p>Opisz tutaj historię firmy, doświadczenie oraz najważniejsze wartości.</p></div><div class="cms-card"><h2>Dlaczego my?</h2><ul><li>indywidualne podejście,</li><li>terminowa realizacja,</li><li>przejrzysta komunikacja,</li><li>sprawdzone rozwiązania.</li></ul></div></section><section class="cms-card-grid"><article class="cms-card"><h3>Misja</h3><p>Tworzymy rozwiązania, które realnie pomagają klientom.</p></article><article class="cms-card"><h3>Wartości</h3><p>Jakość, zaufanie i odpowiedzialność.</p></article><article class="cms-card"><h3>Doświadczenie</h3><p>Wpisz tutaj liczbę lat pracy, projekty lub branże.</p></article></section>'
+        },
+        offer: {
+            title: 'Oferta',
+            slug: 'oferta',
+            html: '<section class="cms-hero" style="background:linear-gradient(135deg,#eef2ff,#fdf2f8);"><h1>Oferta</h1><p>Sprawdź, co możemy dla Ciebie zrobić.</p><p><a class="cms-btn" href="/kontakt">Zapytaj o ofertę</a></p></section><section class="cms-card-grid"><article class="cms-card"><h3>Pakiet podstawowy</h3><p>Krótki opis usługi lub produktu.</p><p><strong>Od 000 zł</strong></p></article><article class="cms-card"><h3>Pakiet standard</h3><p>Najczęściej wybierany zakres współpracy.</p><p><strong>Od 000 zł</strong></p></article><article class="cms-card"><h3>Pakiet premium</h3><p>Rozszerzona obsługa i pełne wsparcie.</p><p><strong>Wycena indywidualna</strong></p></article></section><section class="cms-columns"><div><h2>Jak pracujemy?</h2><ol><li>Analiza potrzeb</li><li>Przygotowanie oferty</li><li>Realizacja</li><li>Odbiór i wsparcie</li></ol></div><div><h2>Co otrzymujesz?</h2><p>Wpisz tutaj najważniejsze korzyści dla klienta.</p></div></section>'
+        },
+        services: {
+            title: 'Usługi',
+            slug: 'uslugi',
+            html: '<section class="cms-hero"><h1>Nasze usługi</h1><p>Kompleksowa obsługa dopasowana do Twoich potrzeb.</p></section><section class="cms-card-grid"><article class="cms-card"><h3>Usługa 1</h3><p>Opis pierwszej usługi, zakresu i efektu dla klienta.</p></article><article class="cms-card"><h3>Usługa 2</h3><p>Opis drugiej usługi oraz głównej korzyści.</p></article><article class="cms-card"><h3>Usługa 3</h3><p>Opis trzeciej usługi i przykładowych zastosowań.</p></article><article class="cms-card"><h3>Usługa 4</h3><p>Dodatkowy zakres lub wsparcie.</p></article></section><section class="cms-faq"><h2>Najczęstsze pytania</h2><details open><summary>Ile trwa realizacja?</summary><p>Termin zależy od zakresu prac. Skontaktuj się z nami, aby otrzymać konkretną informację.</p></details><details><summary>Czy przygotowujecie indywidualną wycenę?</summary><p>Tak, każdą ofertę dopasowujemy do potrzeb klienta.</p></details></section>'
+        },
+        landing: {
+            title: 'Landing Page',
+            slug: 'landing-page',
+            html: '<section class="cms-hero" style="text-align:center;background:linear-gradient(135deg,#111827,#7e22ce);color:#fff;"><h1>Przyciągający nagłówek kampanii</h1><p>Krótko opisz największą korzyść dla odbiorcy i zachęć do działania.</p><p><a class="cms-btn" href="#kontakt" style="background:#fff;color:#7e22ce;">Zamów / Skontaktuj się</a></p></section><section class="cms-card-grid"><article class="cms-card"><h3>Korzyść 1</h3><p>Najważniejszy argument.</p></article><article class="cms-card"><h3>Korzyść 2</h3><p>Co klient zyska?</p></article><article class="cms-card"><h3>Korzyść 3</h3><p>Dlaczego warto teraz?</p></article></section><section class="cms-columns"><div><h2>Dla kogo?</h2><p>Opisz grupę odbiorców i problem, który rozwiązujesz.</p></div><div><h2>Co zawiera oferta?</h2><ul><li>element pierwszy,</li><li>element drugi,</li><li>element trzeci.</li></ul></div></section><section id="kontakt" class="cms-contact"><h2>Gotowy do działania?</h2><p><a class="cms-btn" href="mailto:kontakt@example.com">Napisz do nas</a></p></section>'
+        },
+        faqpage: {
+            title: 'FAQ',
+            slug: 'faq',
+            html: '<section class="cms-hero"><h1>Centrum pomocy / FAQ</h1><p>Najważniejsze pytania i odpowiedzi zebrane w jednym miejscu.</p></section><section class="cms-faq"><h2>Pytania ogólne</h2><details open><summary>Jak mogę skorzystać z oferty?</summary><p>Skontaktuj się z nami telefonicznie lub mailowo. Ustalimy szczegóły i przygotujemy propozycję.</p></details><details><summary>Ile trwa realizacja?</summary><p>Termin zależy od zakresu prac. Standardowo podajemy go po analizie potrzeb.</p></details><details><summary>Czy wystawiacie fakturę?</summary><p>Tak, po realizacji możemy wystawić fakturę zgodnie z ustaleniami.</p></details><details><summary>Czy można zamówić usługę indywidualną?</summary><p>Tak, przygotowujemy również rozwiązania dopasowane do konkretnego przypadku.</p></details></section><section class="cms-contact"><h2>Nie znalazłeś odpowiedzi?</h2><p>Napisz do nas, a odpowiemy możliwie szybko.</p><p><a class="cms-btn" href="/kontakt">Kontakt</a></p></section>'
+        }
+    };
+
+    document.querySelectorAll('[data-page-preset]').forEach(function(btn){
+        btn.addEventListener('click', function(){
+            const key = btn.getAttribute('data-page-preset');
+            const preset = pagePresets[key];
+            if (!preset) return;
+            const editor = tinymce.activeEditor || (tinymce.editors && tinymce.editors[0]);
+            if (!editor) return;
+            const current = (editor.getContent({format:'text'}) || '').trim();
+            if (current && current !== 'Wpisz zawartość...' && !confirm('Zastosowanie presetu zastąpi aktualną treść edytora. Kontynuować?')) return;
+            editor.setContent(preset.html);
+            editor.focus();
+            const form = btn.closest('form');
+            if (form) {
+                const title = form.querySelector('input[name="title"]');
+                const slug = form.querySelector('input[name="slug"], input[name="new_slug"]');
+                if (title && (!title.value || title.value === 'Nowa strona')) title.value = preset.title;
+                if (slug && !slug.value) slug.value = preset.slug;
+            }
+        });
+    });
+
     document.querySelectorAll('[data-snippet]').forEach(function(btn){
         btn.addEventListener('click', function(){
             const key = btn.getAttribute('data-snippet');
@@ -3442,8 +7424,9 @@ document.addEventListener('DOMContentLoaded', function(){
         try { localStorage.setItem(storageKey, tabName); } catch(e) {}
     }
     buttons.forEach(btn => btn.addEventListener('click', () => activate(btn.dataset.settingsTab)));
-    let saved = 'general';
-    try { saved = localStorage.getItem(storageKey) || 'general'; } catch(e) {}
+    const params = new URLSearchParams(window.location.search);
+    let saved = params.get('settings') || 'general';
+    if (!saved) { try { saved = localStorage.getItem(storageKey) || 'general'; } catch(e) {} }
     if (!document.querySelector('.settings-tab-btn[data-settings-tab="' + saved + '"]')) saved = 'general';
     activate(saved);
 })();
@@ -3534,6 +7517,243 @@ document.addEventListener('DOMContentLoaded', function(){
         }
     });
 });
+</script>
+
+
+
+<script id="spidercms-slider-admin-fixed-js">
+document.addEventListener('DOMContentLoaded', function(){
+    const list = document.getElementById('slider-images-list');
+    const add = document.getElementById('add-slider-image');
+    if (!list) return;
+
+    function escAttr(value){
+        return String(value || '').replace(/[&<>'"]/g, function(c){
+            return {'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#039;','"':'&quot;'}[c];
+        });
+    }
+
+    function rowHtml(url, title, desc){
+        return ''
+            + '<div><label>Adres zdjęcia</label><input type="text" name="image_url[]" value="' + escAttr(url || '') + '" placeholder="uploads/zdjecie.jpg"></div>'
+            + '<div><label>Tytuł</label><input type="text" name="image_title[]" value="' + escAttr(title || '') + '" placeholder="Opcjonalnie"></div>'
+            + '<div><label>Opis</label><input type="text" name="image_desc[]" value="' + escAttr(desc || '') + '" placeholder="Opcjonalnie"></div>'
+            + '<button type="button" class="remove-slider-image" style="background:#ef4444;color:white;border:0;border-radius:8px;padding:.75rem;cursor:pointer;"><i class="fa-solid fa-trash"></i></button>';
+    }
+
+    function createRow(url, title, desc){
+        const row = document.createElement('div');
+        row.className = 'slider-image-row';
+        row.style.cssText = 'display:grid;grid-template-columns:1.2fr 1fr 1fr auto;gap:.7rem;align-items:end;background:#1e293b;border:1px solid #334155;border-radius:12px;padding:1rem;';
+        row.innerHTML = rowHtml(url || '', title || '', desc || '');
+        return row;
+    }
+
+    function getRows(){ return Array.from(list.querySelectorAll('.slider-image-row')); }
+
+    function rowUrl(row){
+        const input = row ? row.querySelector('input[name="image_url[]"]') : null;
+        return input ? input.value.trim() : '';
+    }
+
+    function addSliderImage(url, title, desc){
+        url = String(url || '').trim();
+        const rows = getRows();
+
+        // Jeżeli jest tylko jeden pusty wiersz startowy, pierwsze zdjęcie wstawiamy w niego.
+        if (url && rows.length === 1 && rowUrl(rows[0]) === '') {
+            const u = rows[0].querySelector('input[name="image_url[]"]');
+            const t = rows[0].querySelector('input[name="image_title[]"]');
+            const d = rows[0].querySelector('input[name="image_desc[]"]');
+            if (u) u.value = url;
+            if (t) t.value = title || '';
+            if (d) d.value = desc || '';
+            return rows[0];
+        }
+
+        const row = createRow(url, title || '', desc || '');
+        list.appendChild(row);
+        const first = row.querySelector('input[name="image_url[]"]');
+        if (first && !url) first.focus();
+        return row;
+    }
+
+    if (add && add.dataset.sliderBound !== '1') {
+        add.dataset.sliderBound = '1';
+        add.addEventListener('click', function(e){
+            e.preventDefault();
+            addSliderImage('', '', '');
+        });
+    }
+
+    document.addEventListener('click', function(e){
+        const galleryBtn = e.target.closest('.slider-gallery-add');
+        if (galleryBtn) {
+            e.preventDefault();
+            const row = addSliderImage(galleryBtn.dataset.url || '', '', '');
+            if (row) {
+                row.style.outline = '2px solid #22c55e';
+                row.style.outlineOffset = '2px';
+                setTimeout(function(){ row.style.outline = ''; row.style.outlineOffset = ''; }, 650);
+            }
+            galleryBtn.style.outline = '2px solid #22c55e';
+            galleryBtn.style.outlineOffset = '2px';
+            setTimeout(function(){ galleryBtn.style.outline = ''; galleryBtn.style.outlineOffset = ''; }, 650);
+            return;
+        }
+
+        const removeBtn = e.target.closest('.remove-slider-image');
+        if (removeBtn && list.contains(removeBtn)) {
+            e.preventDefault();
+            const row = removeBtn.closest('.slider-image-row');
+            const rows = getRows();
+            if (!row) return;
+            if (rows.length <= 1) {
+                row.querySelectorAll('input').forEach(function(input){ input.value = ''; });
+            } else {
+                row.remove();
+            }
+        }
+    });
+});
+</script>
+
+<script>
+(function(){
+    const btn = document.getElementById('spidercmsMobileMenuBtn');
+    const backdrop = document.getElementById('spidercmsSidebarBackdrop');
+    const body = document.body;
+    function closeMenu(){
+        body.classList.remove('spidercms-sidebar-open');
+        if (btn) btn.setAttribute('aria-expanded','false');
+    }
+    function toggleMenu(){
+        const open = body.classList.toggle('spidercms-sidebar-open');
+        if (btn) btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+    }
+    if (btn) btn.addEventListener('click', toggleMenu);
+    if (backdrop) backdrop.addEventListener('click', closeMenu);
+    document.addEventListener('keydown', function(e){ if(e.key === 'Escape') closeMenu(); });
+    document.querySelectorAll('#sidebar a').forEach(function(a){
+        a.addEventListener('click', function(){ if (window.innerWidth <= 1024) closeMenu(); });
+    });
+})();
+</script>
+
+
+<script>
+/* SPIDERCMS MOBILE HARD JS START */
+(function(){
+    function ready(fn){
+        if(document.readyState !== 'loading') fn();
+        else document.addEventListener('DOMContentLoaded', fn);
+    }
+
+    ready(function(){
+        var meta = document.querySelector('meta[name="viewport"]');
+        if(!meta){
+            meta = document.createElement('meta');
+            meta.name = 'viewport';
+            document.head.appendChild(meta);
+        }
+        meta.setAttribute('content','width=device-width, initial-scale=1, maximum-scale=1');
+
+        var sidebar = document.querySelector('.sidebar, aside.sidebar, .admin-sidebar, .side-menu, nav.sidebar');
+        if(!sidebar) return;
+
+        if(!document.querySelector('.spidercms-mobile-topbar')){
+            var topbar = document.createElement('div');
+            topbar.className = 'spidercms-mobile-topbar';
+
+            var btn = document.createElement('button');
+            btn.type = 'button';
+            btn.className = 'spidercms-mobile-btn';
+            btn.setAttribute('aria-label','Otwórz menu');
+            btn.textContent = '☰';
+
+            var title = document.createElement('div');
+            title.className = 'spidercms-mobile-title';
+            title.textContent = 'SpiderCMS';
+
+            topbar.appendChild(btn);
+            topbar.appendChild(title);
+            document.body.appendChild(topbar);
+
+            var backdrop = document.createElement('div');
+            backdrop.className = 'spidercms-mobile-backdrop';
+            document.body.appendChild(backdrop);
+
+            function closeMenu(){
+                document.body.classList.remove('spidercms-menu-open');
+                btn.textContent = '☰';
+                btn.setAttribute('aria-label','Otwórz menu');
+            }
+
+            function toggleMenu(){
+                var open = document.body.classList.toggle('spidercms-menu-open');
+                btn.textContent = open ? '×' : '☰';
+                btn.setAttribute('aria-label', open ? 'Zamknij menu' : 'Otwórz menu');
+            }
+
+            btn.addEventListener('click', toggleMenu);
+            backdrop.addEventListener('click', closeMenu);
+
+            sidebar.querySelectorAll('a').forEach(function(link){
+                link.addEventListener('click', function(){
+                    if(window.innerWidth <= 1024) closeMenu();
+                });
+            });
+
+            window.addEventListener('keydown', function(e){
+                if(e.key === 'Escape') closeMenu();
+            });
+
+            window.addEventListener('resize', function(){
+                if(window.innerWidth > 1024) closeMenu();
+            });
+        }
+    });
+})();
+/* SPIDERCMS MOBILE HARD JS END */
+</script>
+
+
+
+
+
+
+
+<script>
+/* SPIDERCMS LIVE EDITOR FALLBACK BUTTON START */
+(function(){
+    function ready(fn){ if(document.readyState !== 'loading') fn(); else document.addEventListener('DOMContentLoaded', fn); }
+    ready(function(){
+        if(document.querySelector('.spidercms-live-edit-btn')) return;
+
+        document.querySelectorAll('tr').forEach(function(row){
+            const slugCell = row.querySelector('td code, td .slug, td:first-child code, td:first-child');
+            const actionsCell = row.querySelector('td:last-child');
+            if(!slugCell || !actionsCell) return;
+
+            const text = slugCell.textContent || '';
+            const m = text.match(/[a-zA-Z0-9_-]+\.php/);
+            if(!m) return;
+
+            const file = m[0];
+            if(actionsCell.querySelector('.spidercms-live-edit-btn')) return;
+
+            const edit = Array.from(actionsCell.querySelectorAll('a,button')).find(el => (el.textContent || '').includes('Edytuj'));
+            const a = document.createElement('a');
+            a.className = 'btn secondary spidercms-live-edit-btn';
+            a.href = 'admin.php?action=live_editor&file=' + encodeURIComponent(file);
+            a.textContent = '✨ Edytuj LIVE';
+
+            if(edit) edit.insertAdjacentElement('afterend', a);
+            else actionsCell.insertBefore(a, actionsCell.firstChild);
+        });
+    });
+})();
+/* SPIDERCMS LIVE EDITOR FALLBACK BUTTON END */
 </script>
 
 </body>
