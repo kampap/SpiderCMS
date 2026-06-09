@@ -1,69 +1,180 @@
-# SpiderCMS
+# 🕷 SpiderCMS
 
-**Ultra-lekki, plikowy system zarządzania treścią (Flat-File CMS) napisany w PHP.**
+> Nowoczesny, plikowy CMS bez bazy danych — szybki, lekki i w pełni konfigurowalny.
 
-SpiderCMS to prosty, szybki i w pełni plikowy CMS, który nie wymaga bazy danych. Został stworzony z myślą o wydajności, łatwości obsługi i pełnej kontroli nad kodem.
+![PHP](https://img.shields.io/badge/PHP-7.4%2B-777BB4)
+![Flat File](https://img.shields.io/badge/Database-None-success)
+![Status](https://img.shields.io/badge/Status-Active-brightgreen)
+![License](https://img.shields.io/badge/License-Open--Source-blue)
 
----
+SpiderCMS to nowoczesny system zarządzania treścią (**Flat-File CMS**) napisany w PHP.
 
-## ✨ Główne funkcje
-
-- **Całkowicie plikowy** – nie potrzebuje MySQL ani żadnej bazy danych
-- Nowoczesny, ciemny panel administracyjny w neonowym stylu
-- **Dynamiczna stopka** – dowolna liczba kolumn, edytowalna z poziomu panelu
-- Pełna personalizacja motywu (kolory, logo, czcionki, wymiary, cienie)
-- Wbudowany edytor **TinyMCE** z gotowymi blokami (hero, galerie, FAQ, karty, kolumny itp.)
-- Biblioteka mediów z możliwością wgrywania zdjęć i plików
-- Zarządzanie menu nawigacyjnym (włącz/wyłącz + edycja pozycji)
-- Ustawianie dowolnej strony jako strony głównej
-- Eksport całej witryny do pliku ZIP jednym kliknięciem
-- Zmiana hasła administratora bezpośrednio z panelu
-- Automatyczne propagowanie zmian kolorów na wszystkich stronach
-- Ochrona logowania (blokada po zbyt wielu nieudanych próbach + hashowanie Argon2id)
+Nie wymaga MySQL ani żadnej bazy danych — wszystkie dane przechowywane są w plikach, dzięki czemu instalacja trwa kilka minut, a utrzymanie projektu jest proste i szybkie.
 
 ---
 
-## Wymagania
+# ✨ Najważniejsze funkcje
 
-- PHP 7.4 lub nowszy
-- Serwer z możliwością zapisu plików
----
+## 🎨 Edytor i wygląd
 
-## Instalacja
-
-1. Skopiuj wszystkie pliki do głównego folderu na serwerze 
-2. Ustaw uprawnienia zapisu na:
-   - katalog `pages/`
-   - katalog `uploads/`
-   - pliki zaczynające się od `.` (`.settings.json`, `.theme.json`, `.footer.json` itp.)
-3. Otwórz w przeglądarce adres: `twojadomena.pl/admin.php`
-4. Domyślne hasło: **`admin2026`**
-
-**Zalecane:** Po pierwszym zalogowaniu zmień hasło w zakładce **Ustawienia**.
-
+* Panel administracyjny w stylu Dark / Neon
+* Dynamiczny nagłówek i stopka
+* Logo + nazwa witryny w nagłówku
+* Edycja stylu nazwy strony
+* Regulowana szerokość treści
+* Presety motywów
+* Presety gotowych stron
+* Responsywny interfejs panelu
 
 ---
 
-## Dla kogo jest SpiderCMS?
+## 📄 Zarządzanie stronami
 
-- Osób szukających lekkiej alternatywy dla WordPressa
-- Freelancerów i agencji tworzących proste strony www
-- Portfolio, stron firmowych, landing page’i i małych blogów
-- Projektów, w których liczy się szybkość działania i prostota utrzymania
-
----
-
-## Autor
-
-Kamil Paprota
+* Tworzenie stron
+* Edycja stron
+* Duplikowanie stron
+* Edycja nazwy po duplikacji
+* Ustawianie strony głównej
+* Własne foldery stron
+* Import / eksport witryny
 
 ---
 
-## Licencja
+## ✨ Edytor LIVE
 
-Projekt jest open-source. Możesz go używać prywatnie i komercyjnie.
+Opcjonalna edycja strony bezpośrednio w podglądzie:
+
+* edycja tekstu,
+* zmiana obrazów,
+* sekcje HERO,
+* CTA,
+* FAQ,
+* podgląd desktop / tablet / mobile,
+* cofanie zmian,
+* zapis skrótem `CTRL + S`,
+* automatyczne kopie.
 
 ---
 
-**Staruj repozytorium, jeśli projekt Ci się podoba!**  
-Pull Requesty oraz sugestie są mile widziane.
+## 🖼 Slider Builder
+
+Tworzenie sliderów:
+
+* wiele zdjęć,
+* wybór z galerii,
+* responsywne obrazy,
+* shortcode:
+
+```txt
+[slider id="hero"]
+```
+
+---
+
+## 💬 Chat
+
+* formularz wiadomości,
+* historia rozmów,
+* archiwum,
+* powiadomienia e-mail,
+* SMTP,
+* antyspam.
+
+---
+
+## 📈 Statystyki
+
+* odsłony,
+* użytkownicy,
+* popularne strony,
+* wykresy,
+* aktywni użytkownicy,
+* eksport.
+
+---
+
+## 🔐 Bezpieczeństwo
+
+* brak bazy danych,
+* Argon2id,
+* blokada brute force,
+* logi działań,
+* ochrona uploadów,
+* zabezpieczenia `.htaccess`,
+* blokada wykonywania PHP,
+* bezpieczne sesje.
+
+---
+
+# 📁 Struktura projektu
+
+```txt
+SpiderCMS
+├── admin.php
+├── pages/
+├── uploads/
+├── assets/
+├── .chat/
+├── .stats/
+├── .logs/
+├── .backups/
+├── .theme.json
+├── .settings.json
+└── README.md
+```
+
+---
+
+# 🚀 Instalacja
+
+1. Wgraj pliki na serwer.
+2. Nadaj zapis:
+
+```txt
+pages/
+uploads/
+.logs/
+.stats/
+.backups/
+```
+
+3. Otwórz:
+
+```txt
+twojadomena.pl/admin.php
+```
+
+4. Zaloguj się.
+
+Po pierwszym uruchomieniu:
+
+* zmień hasło,
+* ustaw motyw,
+* wybierz stronę główną.
+
+---
+
+# 🧩 Roadmap
+
+* [ ] System wtyczek
+* [ ] Historia zmian
+* [ ] Wersjonowanie stron
+* [ ] Marketplace motywów
+* [ ] Wielojęzyczność
+
+---
+
+# 👨‍💻 Autor
+
+**Kamil Paprota**
+
+---
+
+# ⭐ Wsparcie projektu
+
+Jeżeli SpiderCMS Ci się podoba:
+
+⭐ zostaw gwiazdkę
+🐞 zgłoś problem
+🧩 zaproponuj funkcję
+🚀 rozwijaj projekt razem z nami
