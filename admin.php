@@ -3392,6 +3392,8 @@ if (($_GET['action'] ?? '') === 'live_editor') {
             </div>
             <div class="live-actions">
                 <a class="live-btn light" href="admin.php?tab=pages">← Wróć</a>
+            <a class="<?= (($tab ?? '') === 'bookings') ? 'active' : '' ?>" href="admin.php?tab=bookings">📅 Rezerwacje</a>
+            <a class="<?= ($tab ?? '') === 'bookings' ? 'active' : '' ?>" href="admin.php?tab=bookings">📅 Rezerwacje</a>
                 <button class="live-btn dark" type="button" onclick="document.execCommand('bold')">B</button>
                 <button class="live-btn dark" type="button" onclick="document.execCommand('italic')"><i>I</i></button>
                 <button class="live-btn dark" type="button" onclick="document.execCommand('formatBlock', false, 'h2')">H2</button>
@@ -3673,6 +3675,1326 @@ if (($_POST['action'] ?? '') === 'save_live_editor_settings') {
 
 
 // ----------------------------------------------------------------------
+// SPIDERCMS BOOKING SYSTEM START
+// Moduł rezerwacji: flat-file, bez bazy danych.
+// Dane: .bookings/settings.json, .bookings/reservations.json, .bookings/blocked.json
+// Publiczny shortcode / include: booking-widget.php
+// ----------------------------------------------------------------------
+
+$booking_dir = __DIR__ . '/.bookings';
+if (!is_dir($booking_dir)) {
+    @mkdir($booking_dir, 0750, true);
+}
+spidercms_write_htaccess($booking_dir, "Options -Indexes\nRequire all denied\nDeny from all\n");
+
+$booking_settings_file = $booking_dir . '/settings.json';
+$booking_reservations_file = $booking_dir . '/reservations.json';
+$booking_blocked_file = $booking_dir . '/blocked.json';
+
+$booking_defaults = [
+    'enabled' => '1',
+    'title' => 'Zarezerwuj termin',
+    'subtitle' => 'Wybierz dogodny dzień i godzinę. Potwierdzenie wyślemy e-mailem.',
+    'service_name' => 'Konsultacja',
+    'slot_minutes' => '60',
+    'days_ahead' => '30',
+    'min_notice_hours' => '4',
+    'work_days' => ['1','2','3','4','5'],
+    'work_start' => '09:00',
+    'work_end' => '17:00',
+    'admin_email' => '',
+    'notify_admin' => '1',
+    'notify_client' => '1',
+    'require_phone' => '0',
+    'confirmation_mode' => 'manual',
+];
+
+function spidercms_booking_load_json($file, $default = []) {
+    if (!file_exists($file)) return $default;
+    $data = json_decode((string)file_get_contents($file), true);
+    return is_array($data) ? $data : $default;
+}
+
+function spidercms_booking_save_json($file, array $data) {
+    $dir = dirname($file);
+    if (!is_dir($dir)) @mkdir($dir, 0750, true);
+    return file_put_contents($file, json_encode($data, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES), LOCK_EX) !== false;
+}
+
+$booking_settings_loaded = spidercms_booking_load_json($booking_settings_file, []);
+if (!is_array($booking_settings_loaded)) $booking_settings_loaded = [];
+$booking_settings = array_merge($booking_defaults, $booking_settings_loaded);
+$booking_settings['work_days'] = spidercms_booking_normalize_work_days($booking_settings['work_days'] ?? ['1','2','3','4','5']);
+
+
+function spidercms_booking_normalize_work_days($value) {
+    if (is_string($value)) {
+        $value = array_filter(array_map('trim', explode(',', $value)));
+    }
+
+    if (!is_array($value)) {
+        $value = ['1','2','3','4','5'];
+    }
+
+    $allowed = ['1','2','3','4','5','6','7'];
+    $out = [];
+
+    foreach ($value as $v) {
+        $v = (string)$v;
+        if (in_array($v, $allowed, true)) {
+            $out[] = $v;
+        }
+    }
+
+    $out = array_values(array_unique($out));
+
+    // Jeśli użytkownik nie zaznaczy nic, nie zostawiamy pustego kalendarza.
+    // Domyślnie wracamy do dni roboczych.
+    if (!$out) {
+        $out = ['1','2','3','4','5'];
+    }
+
+    return $out;
+}
+
+function spidercms_booking_clean($value, $max = 500) {
+    $value = trim((string)$value);
+    $value = strip_tags($value);
+    $value = preg_replace('/\s+/', ' ', $value);
+    if (function_exists('mb_substr')) return mb_substr($value, 0, $max, 'UTF-8');
+    return substr($value, 0, $max);
+}
+
+function spidercms_booking_valid_date($date) {
+    return is_string($date) && preg_match('/^\d{4}-\d{2}-\d{2}$/', $date);
+}
+
+function spidercms_booking_valid_time($time) {
+    return is_string($time) && preg_match('/^\d{2}:\d{2}$/', $time);
+}
+
+function spidercms_booking_public_rate_limit($limit = 6, $window = 300) {
+    $dir = __DIR__ . '/.bookings/rate';
+    if (!is_dir($dir)) @mkdir($dir, 0750, true);
+    $ip = $_SERVER['REMOTE_ADDR'] ?? '0.0.0.0';
+    $file = $dir . '/' . hash('sha256', $ip) . '.json';
+    $now = time();
+    $items = file_exists($file) ? json_decode((string)file_get_contents($file), true) : [];
+    if (!is_array($items)) $items = [];
+    $items = array_values(array_filter($items, fn($t) => is_int($t) && $t > ($now - $window)));
+    if (count($items) >= $limit) return false;
+    $items[] = $now;
+    file_put_contents($file, json_encode($items), LOCK_EX);
+    return true;
+}
+
+function spidercms_booking_load_reservations() {
+    global $booking_reservations_file;
+    $data = spidercms_booking_load_json($booking_reservations_file, []);
+    return is_array($data) ? $data : [];
+}
+
+
+function spidercms_booking_stats_summary() {
+    $items = function_exists('spidercms_booking_load_reservations') ? spidercms_booking_load_reservations() : [];
+    $today = date('Y-m-d');
+    $all = 0;
+    $new = 0;
+    $confirmed = 0;
+    $today_count = 0;
+    $upcoming = 0;
+
+    foreach ($items as $r) {
+        $status = $r['status'] ?? 'new';
+        if ($status === 'cancelled') {
+            continue;
+        }
+
+        $all++;
+        if ($status === 'new') $new++;
+        if ($status === 'confirmed') $confirmed++;
+        if (($r['date'] ?? '') === $today) $today_count++;
+        if (($r['date'] ?? '') >= $today) $upcoming++;
+    }
+
+    return [
+        'all' => $all,
+        'new' => $new,
+        'confirmed' => $confirmed,
+        'today' => $today_count,
+        'upcoming' => $upcoming,
+    ];
+}
+
+function spidercms_booking_save_reservations(array $data) {
+    global $booking_reservations_file;
+    return spidercms_booking_save_json($booking_reservations_file, $data);
+}
+
+function spidercms_booking_load_blocked() {
+    global $booking_blocked_file;
+    $data = spidercms_booking_load_json($booking_blocked_file, []);
+    return is_array($data) ? $data : [];
+}
+
+function spidercms_booking_is_taken($date, $time, $ignore_id = '') {
+    foreach (spidercms_booking_load_reservations() as $r) {
+        if (($r['id'] ?? '') === $ignore_id) continue;
+        if (($r['status'] ?? 'new') === 'cancelled') continue;
+        if (($r['date'] ?? '') === $date && ($r['time'] ?? '') === $time) {
+            return true;
+        }
+    }
+    return false;
+}
+
+function spidercms_booking_is_blocked($date, $time) {
+    foreach (spidercms_booking_load_blocked() as $b) {
+        if (($b['date'] ?? '') !== $date) continue;
+        $from = $b['from'] ?? '';
+        $to = $b['to'] ?? '';
+        if ($from === '' && $to === '') return true;
+        if ($from !== '' && $to !== '' && $time >= $from && $time < $to) return true;
+    }
+    return false;
+}
+
+function spidercms_booking_slots_for_date($date) {
+    global $booking_settings;
+    if (!spidercms_booking_valid_date($date)) return [];
+
+    $ts = strtotime($date . ' 00:00:00');
+    if (!$ts) return [];
+
+    $weekday = (string)date('N', $ts);
+    $work_days = spidercms_booking_normalize_work_days($booking_settings['work_days'] ?? ['1','2','3','4','5']);
+
+    if (!in_array($weekday, $work_days, true)) return [];
+
+    $slot_minutes = max(15, (int)($booking_settings['slot_minutes'] ?? 60));
+    $start = $booking_settings['work_start'] ?? '09:00';
+    $end = $booking_settings['work_end'] ?? '17:00';
+
+    if (!spidercms_booking_valid_time($start) || !spidercms_booking_valid_time($end)) return [];
+
+    $start_ts = strtotime($date . ' ' . $start);
+    $end_ts = strtotime($date . ' ' . $end);
+    if (!$start_ts || !$end_ts || $start_ts >= $end_ts) return [];
+
+    $min_notice = max(0, (int)($booking_settings['min_notice_hours'] ?? 4));
+    $min_allowed = time() + ($min_notice * 3600);
+
+    $slots = [];
+    for ($t = $start_ts; $t + ($slot_minutes * 60) <= $end_ts; $t += $slot_minutes * 60) {
+        if ($t < $min_allowed) continue;
+        $time = date('H:i', $t);
+        if (spidercms_booking_is_taken($date, $time)) continue;
+        if (spidercms_booking_is_blocked($date, $time)) continue;
+        $slots[] = $time;
+    }
+
+    return $slots;
+}
+
+function spidercms_booking_email_log($message, array $context = []) {
+    $dir = __DIR__ . '/.bookings';
+    if (!is_dir($dir)) @mkdir($dir, 0750, true);
+
+    $entry = [
+        'time' => date('Y-m-d H:i:s'),
+        'message' => (string)$message,
+        'context' => $context,
+    ];
+
+    @file_put_contents(
+        $dir . '/email.log',
+        json_encode($entry, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) . "\n",
+        FILE_APPEND | LOCK_EX
+    );
+}
+
+function spidercms_booking_call_chat_mailer($to, $subject, $body, $reply_to = '') {
+    // Rezerwacje używają najpierw tego samego mechanizmu, który działa w module Chat.
+    // Obsługujemy kilka możliwych nazw funkcji, bo w kolejnych wersjach pliku mogły mieć różne nazwy.
+    $candidates = [
+        'chat_send_email_notification',
+        'chat_send_email',
+        'spidercms_chat_send_email',
+        'spidercms_chat_send_notification_email',
+        'spidercms_send_chat_email',
+        'spidercms_send_email_notification',
+    ];
+
+    foreach ($candidates as $fn) {
+        if (function_exists($fn)) {
+            try {
+                $ref = new ReflectionFunction($fn);
+                $params = $ref->getNumberOfParameters();
+
+                if ($params >= 4) {
+                    $ok = $fn($to, $subject, $body, $reply_to);
+                } elseif ($params === 3) {
+                    $ok = $fn($to, $subject, $body);
+                } elseif ($params === 2) {
+                    $ok = $fn($subject, $body);
+                } else {
+                    continue;
+                }
+
+                spidercms_booking_email_log('Próba wysyłki przez mailer czatu: ' . $fn, [
+                    'to' => $to,
+                    'subject' => $subject,
+                    'result' => (bool)$ok
+                ]);
+
+                if ($ok) {
+                    return true;
+                }
+            } catch (Throwable $e) {
+                spidercms_booking_email_log('Błąd mailera czatu: ' . $fn . ' / ' . $e->getMessage(), [
+                    'to' => $to,
+                    'subject' => $subject
+                ]);
+            }
+        }
+    }
+
+    return false;
+}
+
+function spidercms_booking_send_email($to, $subject, $body, $reply_to = '') {
+    $to = trim((string)$to);
+    if (!filter_var($to, FILTER_VALIDATE_EMAIL)) {
+        spidercms_booking_email_log('Niepoprawny adres odbiorcy.', ['to' => $to]);
+        return false;
+    }
+
+    // 1) Najpierw użyj dokładnie działającego mechanizmu czatu.
+    if (spidercms_booking_call_chat_mailer($to, $subject, $body, $reply_to)) {
+        spidercms_booking_email_log('Wysłano e-mail modułu rezerwacji przez mechanizm czatu.', [
+            'to' => $to,
+            'subject' => $subject
+        ]);
+        return true;
+    }
+
+    // 2) Jeśli w tym pliku nie ma funkcji czatu, użyj ustawień czatu jako konfiguracji mail().
+    global $chat_settings, $booking_settings;
+
+    $from = '';
+    if (is_array($chat_settings ?? null)) {
+        $from = trim((string)(
+            $chat_settings['from_email']
+            ?? $chat_settings['email_from']
+            ?? $chat_settings['smtp_user']
+            ?? $chat_settings['admin_email']
+            ?? ''
+        ));
+    }
+
+    if (!filter_var($from, FILTER_VALIDATE_EMAIL)) {
+        $from = trim((string)(
+            $booking_settings['from_email']
+            ?? $booking_settings['admin_email']
+            ?? ''
+        ));
+    }
+
+    if (!filter_var($from, FILTER_VALIDATE_EMAIL)) {
+        $host = preg_replace('/[^a-zA-Z0-9\.\-]/', '', $_SERVER['HTTP_HOST'] ?? 'localhost');
+        $from = 'no-reply@' . $host;
+    }
+
+    $site = defined('SITE_NAME') ? SITE_NAME : 'SpiderCMS';
+
+    $headers = [];
+    $headers[] = 'MIME-Version: 1.0';
+    $headers[] = 'Content-Type: text/plain; charset=UTF-8';
+    $headers[] = 'From: ' . $site . ' <' . $from . '>';
+    if ($reply_to && filter_var($reply_to, FILTER_VALIDATE_EMAIL)) {
+        $headers[] = 'Reply-To: ' . $reply_to;
+    }
+
+    $ok = @mail(
+        $to,
+        '=?UTF-8?B?' . base64_encode((string)$subject) . '?=',
+        (string)$body,
+        implode("\r\n", $headers),
+        '-f' . $from
+    );
+
+    spidercms_booking_email_log($ok ? 'Fallback mail() zwróciło OK.' : 'Fallback mail() zwróciło błąd.', [
+        'to' => $to,
+        'subject' => $subject,
+        'from' => $from
+    ]);
+
+    return $ok;
+}
+
+
+function spidercms_booking_send_confirmation_to_client(array $reservation) {
+    $email = trim((string)($reservation['email'] ?? ''));
+    if (!filter_var($email, FILTER_VALIDATE_EMAIL)) {
+        spidercms_booking_email_log('Nie wysłano potwierdzenia: brak poprawnego e-mail klienta.', [
+            'reservation_id' => $reservation['id'] ?? '',
+            'email' => $email
+        ]);
+        return false;
+    }
+
+    $name = spidercms_booking_clean($reservation['name'] ?? 'Kliencie', 120);
+    $date = spidercms_booking_clean($reservation['date'] ?? '', 20);
+    $time = spidercms_booking_clean($reservation['time'] ?? '', 20);
+    $service = spidercms_booking_clean($reservation['service'] ?? 'Rezerwacja', 160);
+
+    global $booking_settings;
+    $admin_email = trim((string)($booking_settings['admin_email'] ?? ''));
+
+    $subject = 'Wizyta została potwierdzona: ' . $date . ' ' . $time;
+
+    $body =
+        "Dzień dobry {$name},\n\n" .
+        "Twoja wizyta została potwierdzona.\n\n" .
+        "Szczegóły rezerwacji:\n" .
+        "Usługa: {$service}\n" .
+        "Data: {$date}\n" .
+        "Godzina: {$time}\n\n" .
+        "Do zobaczenia!\n";
+
+    $ok = spidercms_booking_send_email($email, $subject, $body, $admin_email);
+
+    spidercms_booking_email_log($ok ? 'Wysłano potwierdzenie wizyty do klienta.' : 'Nie udało się wysłać potwierdzenia wizyty do klienta.', [
+        'reservation_id' => $reservation['id'] ?? '',
+        'to' => $email,
+        'date' => $date,
+        'time' => $time
+    ]);
+
+    return $ok;
+}
+
+function spidercms_booking_create_widget_file() {
+    global $booking_settings;
+    $payload = var_export($booking_settings, true);
+    $widget = <<<'PHP'
+<?php
+$spidercms_booking_settings = __BOOKING_SETTINGS__;
+if (($spidercms_booking_settings['enabled'] ?? '1') !== '1') return;
+$spidercms_booking_endpoint = (defined('BASE_URL') ? rtrim(BASE_URL, '/') : '') . '/admin.php';
+?>
+<div class="spidercms-booking-widget" data-endpoint="<?php echo htmlspecialchars($spidercms_booking_endpoint, ENT_QUOTES, 'UTF-8'); ?>">
+  <div class="spidercms-booking-head">
+    <h2><?php echo htmlspecialchars($spidercms_booking_settings['title'] ?? 'Zarezerwuj termin', ENT_QUOTES, 'UTF-8'); ?></h2>
+    <p><?php echo htmlspecialchars($spidercms_booking_settings['subtitle'] ?? '', ENT_QUOTES, 'UTF-8'); ?></p>
+  </div>
+
+  <div class="spidercms-booking-layout">
+    <div class="spidercms-booking-calendar">
+      <div class="spidercms-booking-monthbar">
+        <button type="button" data-cal-prev>‹</button>
+        <strong data-cal-title></strong>
+        <button type="button" data-cal-next>›</button>
+      </div>
+      <div class="spidercms-booking-weekdays">
+        <span>Pn</span><span>Wt</span><span>Śr</span><span>Cz</span><span>Pt</span><span>Sb</span><span>Nd</span>
+      </div>
+      <div class="spidercms-booking-days" data-cal-days></div>
+    </div>
+
+    <form class="spidercms-booking-form">
+      <input type="text" name="website" value="" tabindex="-1" autocomplete="off" style="position:absolute;left:-9999px;opacity:0;height:0;width:0;" aria-hidden="true">
+      <input type="hidden" name="date" required>
+
+      <label>Wybrana data
+        <input type="text" data-selected-date readonly placeholder="Wybierz dzień w kalendarzu">
+      </label>
+
+      <label>Godzina
+        <select name="time" required>
+          <option value="">Najpierw wybierz datę</option>
+        </select>
+      </label>
+
+      <label>Imię i nazwisko
+        <input type="text" name="name" required maxlength="120">
+      </label>
+
+      <label>E-mail
+        <input type="email" name="email" required maxlength="160">
+      </label>
+
+      <label>Telefon
+        <input type="tel" name="phone" maxlength="80" <?php echo (($spidercms_booking_settings['require_phone'] ?? '0') === '1') ? 'required' : ''; ?>>
+      </label>
+
+      <label>Wiadomość
+        <textarea name="message" rows="3" maxlength="1200"></textarea>
+      </label>
+
+      <button type="submit">Zarezerwuj termin</button>
+      <p class="spidercms-booking-status"></p>
+    </form>
+  </div>
+</div>
+
+<style>
+.spidercms-booking-widget{max-width:1040px;margin:2rem auto;padding:1.5rem;border-radius:24px;background:#fff;box-shadow:0 18px 50px rgba(15,23,42,.12);border:1px solid #e5e7eb;color:#111827;font-family:system-ui,sans-serif}
+.spidercms-booking-head h2{margin:0 0 .35rem;color:var(--primary,#a855f7);font-size:clamp(1.6rem,3vw,2.4rem)}
+.spidercms-booking-head p{margin:0 0 1.2rem;color:#64748b}
+.spidercms-booking-layout{display:grid;grid-template-columns:1.15fr .85fr;gap:1.2rem;align-items:start}
+.spidercms-booking-calendar{background:#f8fafc;border:1px solid #e2e8f0;border-radius:20px;padding:1rem}
+.spidercms-booking-monthbar{display:flex;justify-content:space-between;align-items:center;margin-bottom:.8rem}
+.spidercms-booking-monthbar button{width:38px;height:38px;border:0;border-radius:12px;background:#111827;color:white;font-size:1.6rem;line-height:1;cursor:pointer}
+.spidercms-booking-monthbar strong{font-size:1.05rem}
+.spidercms-booking-weekdays,.spidercms-booking-days{display:grid;grid-template-columns:repeat(7,1fr);gap:.45rem}
+.spidercms-booking-weekdays span{text-align:center;color:#64748b;font-weight:800;font-size:.85rem;padding:.35rem 0}
+.spidercms-booking-day{aspect-ratio:1/1;border:1px solid #e2e8f0;border-radius:14px;background:white;color:#111827;font-weight:850;cursor:pointer;display:flex;align-items:center;justify-content:center;position:relative}
+.spidercms-booking-day:hover{border-color:var(--primary,#a855f7);box-shadow:0 8px 20px rgba(168,85,247,.12)}
+.spidercms-booking-day.is-muted{opacity:.25;pointer-events:none}
+.spidercms-booking-day.is-disabled{opacity:.35;cursor:not-allowed;background:#e5e7eb;pointer-events:none}
+.spidercms-booking-day.is-selected{background:var(--primary,#a855f7);color:#fff;border-color:var(--primary,#a855f7)}
+.spidercms-booking-day.has-slots::after{content:"";position:absolute;bottom:7px;width:6px;height:6px;border-radius:999px;background:#22c55e}
+.spidercms-booking-form{display:grid;gap:.85rem;background:#f8fafc;border:1px solid #e2e8f0;border-radius:20px;padding:1rem}
+.spidercms-booking-form label{display:grid;gap:.35rem;font-weight:750;color:#334155}
+.spidercms-booking-form input,.spidercms-booking-form select,.spidercms-booking-form textarea{width:100%;box-sizing:border-box;border:1px solid #cbd5e1;border-radius:12px;padding:.8rem;font:inherit;background:white;color:#111827}
+.spidercms-booking-form button{border:0;border-radius:999px;background:var(--button-bg,#a855f7);color:var(--button-text,#fff);font-weight:900;padding:.9rem 1.2rem;cursor:pointer}
+.spidercms-booking-status{min-height:1.4rem;color:#475569;font-weight:700}
+@media(max-width:820px){.spidercms-booking-layout{grid-template-columns:1fr}.spidercms-booking-widget{margin:1rem;padding:1rem;border-radius:18px}.spidercms-booking-day{border-radius:10px;font-size:.9rem}}
+</style>
+
+<script>
+(function(){
+  document.querySelectorAll('.spidercms-booking-widget').forEach(function(widget){
+    if(widget.dataset.ready === '1') return;
+    widget.dataset.ready = '1';
+
+    const endpoint = widget.dataset.endpoint || '/admin.php';
+    const form = widget.querySelector('.spidercms-booking-form');
+    const hiddenDate = form.querySelector('[name="date"]');
+    const selectedDateView = form.querySelector('[data-selected-date]');
+    const time = form.querySelector('[name="time"]');
+    const status = widget.querySelector('.spidercms-booking-status');
+    const daysBox = widget.querySelector('[data-cal-days]');
+    const title = widget.querySelector('[data-cal-title]');
+    const prev = widget.querySelector('[data-cal-prev]');
+    const next = widget.querySelector('[data-cal-next]');
+    const maxDays = parseInt(<?php echo json_encode((int)($spidercms_booking_settings['days_ahead'] ?? 30)); ?>,10) || 30;
+
+    let current = new Date();
+    current.setDate(1);
+    const today = new Date();
+    today.setHours(0,0,0,0);
+    const max = new Date();
+    max.setDate(max.getDate() + maxDays);
+    max.setHours(0,0,0,0);
+
+    function fmtDate(d){
+      const y = d.getFullYear();
+      const m = String(d.getMonth()+1).padStart(2,'0');
+      const day = String(d.getDate()).padStart(2,'0');
+      return y + '-' + m + '-' + day;
+    }
+
+    function setStatus(msg){ status.textContent = msg || ''; }
+
+    function loadSlots(dateValue){
+      time.innerHTML = '<option value="">Ładowanie...</option>';
+      return fetch(endpoint + '?action=booking_public_slots&date=' + encodeURIComponent(dateValue), {credentials:'same-origin'})
+        .then(r => r.json())
+        .then(d => {
+          time.innerHTML = '';
+          if(!d.ok || !d.slots || !d.slots.length){
+            time.innerHTML = '<option value="">Brak wolnych terminów</option>';
+            return [];
+          }
+          time.innerHTML = '<option value="">Wybierz godzinę</option>';
+          d.slots.forEach(function(s){
+            const o = document.createElement('option');
+            o.value = s; o.textContent = s; time.appendChild(o);
+          });
+          return d.slots;
+        })
+        .catch(() => {
+          time.innerHTML = '<option value="">Błąd ładowania</option>';
+          return [];
+        });
+    }
+
+    function renderCalendar(){
+      daysBox.innerHTML = '';
+      const monthNames = ['styczeń','luty','marzec','kwiecień','maj','czerwiec','lipiec','sierpień','wrzesień','październik','listopad','grudzień'];
+      title.textContent = monthNames[current.getMonth()] + ' ' + current.getFullYear();
+
+      const first = new Date(current.getFullYear(), current.getMonth(), 1);
+      const startOffset = (first.getDay() + 6) % 7;
+      const daysInMonth = new Date(current.getFullYear(), current.getMonth()+1, 0).getDate();
+
+      for(let i=0;i<startOffset;i++){
+        const blank = document.createElement('div');
+        blank.className = 'spidercms-booking-day is-muted';
+        daysBox.appendChild(blank);
+      }
+
+      for(let d=1; d<=daysInMonth; d++){
+        const dateObj = new Date(current.getFullYear(), current.getMonth(), d);
+        dateObj.setHours(0,0,0,0);
+        const dateValue = fmtDate(dateObj);
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'spidercms-booking-day';
+        btn.textContent = d;
+        btn.dataset.date = dateValue;
+
+        if(dateObj < today || dateObj > max){
+          btn.classList.add('is-disabled');
+        }else{
+          btn.classList.add('has-slots');
+        }
+
+        btn.addEventListener('click', function(){
+          widget.querySelectorAll('.spidercms-booking-day.is-selected').forEach(el => el.classList.remove('is-selected'));
+          btn.classList.add('is-selected');
+          hiddenDate.value = dateValue;
+          selectedDateView.value = dateValue;
+          setStatus('Ładowanie dostępnych godzin...');
+          loadSlots(dateValue).then(function(slots){
+            setStatus(slots.length ? 'Wybierz godzinę i uzupełnij dane.' : 'Brak wolnych godzin w tym dniu.');
+          });
+        });
+
+        daysBox.appendChild(btn);
+      }
+    }
+
+    prev.addEventListener('click', function(){
+      current.setMonth(current.getMonth()-1);
+      renderCalendar();
+    });
+
+    next.addEventListener('click', function(){
+      current.setMonth(current.getMonth()+1);
+      renderCalendar();
+    });
+
+    form.addEventListener('submit', function(e){
+      e.preventDefault();
+      if(!hiddenDate.value){
+        setStatus('Wybierz datę w kalendarzu.');
+        return;
+      }
+      const fd = new FormData(form);
+      fd.set('action','booking_public_create');
+      setStatus('Wysyłanie rezerwacji...');
+      fetch(endpoint, {method:'POST', body:fd, credentials:'same-origin'})
+        .then(r => r.json())
+        .then(d => {
+          if(d.ok){
+            form.reset();
+            hiddenDate.value = '';
+            selectedDateView.value = '';
+            time.innerHTML = '<option value="">Najpierw wybierz datę</option>';
+            widget.querySelectorAll('.spidercms-booking-day.is-selected').forEach(el => el.classList.remove('is-selected'));
+            setStatus(d.message || 'Rezerwacja została zapisana.');
+          }else{
+            setStatus(d.error || 'Nie udało się zapisać rezerwacji.');
+          }
+        })
+        .catch(() => setStatus('Błąd połączenia.'));
+    });
+
+    renderCalendar();
+  });
+})();
+</script>
+PHP;
+    $widget = str_replace('__BOOKING_SETTINGS__', $payload, $widget);
+    file_put_contents(__DIR__ . '/booking-widget.php', $widget, LOCK_EX);
+}
+
+
+function spidercms_booking_create_embed_js_file() {
+    $js = <<<'JS'
+(function(){
+  function ready(fn){
+    if(document.readyState !== 'loading') fn();
+    else document.addEventListener('DOMContentLoaded', fn);
+  }
+
+  ready(function(){
+    document.querySelectorAll('[data-spidercms-booking]').forEach(function(box){
+      if(box.dataset.loaded === '1') return;
+      box.dataset.loaded = '1';
+      var endpoint = box.getAttribute('data-endpoint') || '/admin.php';
+      box.innerHTML = '<div style="padding:1rem;border-radius:14px;background:#f8fafc;border:1px solid #e2e8f0;color:#475569;font-family:system-ui,sans-serif">Ładowanie rezerwacji...</div>';
+
+      fetch(endpoint + '?action=booking_public_widget', {credentials:'same-origin'})
+        .then(function(r){ return r.text(); })
+        .then(function(html){
+          box.innerHTML = html;
+          box.querySelectorAll('script').forEach(function(oldScript){
+            var s = document.createElement('script');
+            if(oldScript.src) s.src = oldScript.src;
+            s.text = oldScript.textContent || '';
+            document.body.appendChild(s);
+            oldScript.remove();
+          });
+        })
+        .catch(function(){
+          box.innerHTML = '<div style="padding:1rem;border-radius:14px;background:#fee2e2;color:#991b1b">Nie udało się załadować modułu rezerwacji.</div>';
+        });
+    });
+  });
+})();
+JS;
+    file_put_contents(__DIR__ . '/booking-embed.js', $js, LOCK_EX);
+}
+
+function spidercms_booking_embed_html($depth = null) {
+    if ($depth === null) {
+        $depth = defined('ACTIVE_PAGES_DEPTH') ? (int)ACTIVE_PAGES_DEPTH : 1;
+    }
+    $depth = max(1, (int)$depth);
+    $prefix = str_repeat('../', $depth);
+    $admin = $prefix . 'admin.php';
+    $js = $prefix . 'booking-embed.js';
+
+    return '<div data-spidercms-booking data-endpoint="' . htmlspecialchars($admin, ENT_QUOTES, 'UTF-8') . '"></div>' . "\n" .
+           '<script src="' . htmlspecialchars($js, ENT_QUOTES, 'UTF-8') . '"></script>';
+}
+
+function spidercms_booking_cleanup_bad_autoload_footer() {
+    $footer = __DIR__ . '/footer.php';
+    if (!is_file($footer)) return false;
+
+    $content = file_get_contents($footer);
+    $original = $content;
+
+    $content = preg_replace('~<\?php\s+if\s*\(file_exists\(__DIR__\s*\.\s*\'/booking-autoload\.php\'\)\)\s*require_once\s+__DIR__\s*\.\s*\'/booking-autoload\.php\';\s*\?>~', '', $content);
+    $content = preg_replace('~<\?php\s+require_once\s+__DIR__\s*\.\s*\'/booking-autoload\.php\';\s*\?>~', '', $content);
+    $content = preg_replace('~<script>.*?SPIDERCMS Booking Autoload.*?</script>~is', '', $content);
+
+    if ($content !== $original) {
+        file_put_contents($footer, $content, LOCK_EX);
+        return true;
+    }
+
+    return false;
+}
+
+function spidercms_booking_repair_pages_after_bad_shortcode() {
+    $updated = 0;
+    $dirs = [];
+
+    if (defined('ACTIVE_PAGES_DIR')) {
+        $dirs[] = [ACTIVE_PAGES_DIR, defined('ACTIVE_PAGES_DEPTH') ? (int)ACTIVE_PAGES_DEPTH : 1];
+    }
+
+    $dirs[] = [__DIR__ . '/pages', 1];
+
+    if (function_exists('spidercms_available_page_folders')) {
+        foreach (spidercms_available_page_folders() as $folder) {
+            $dirs[] = [spidercms_page_folder_dir($folder), spidercms_page_folder_depth($folder)];
+        }
+    }
+
+    $seen = [];
+
+    foreach ($dirs as $pair) {
+        [$dir, $depth] = $pair;
+        if (!is_dir($dir)) continue;
+
+        foreach (glob($dir . '/*.php') ?: [] as $file) {
+            $real = realpath($file) ?: $file;
+            if (isset($seen[$real])) continue;
+            $seen[$real] = true;
+
+            $content = file_get_contents($file);
+            $original = $content;
+
+            // Cofnij wcześniejsze błędne include PHP w treści.
+            $content = preg_replace('~<\?php\s+require_once\s+dirname\(__DIR__,\s*\d+\)\s*\.\s*\'/booking-widget\.php\';\s*\?>~', '[booking]', $content);
+            $content = preg_replace('~<\?php\s+require_once\s+dirname\(__DIR__\)\s*\.\s*\'/booking-widget\.php\';\s*\?>~', '[booking]', $content);
+
+            // Usuń runtime processor, jeśli został wstrzyknięty do strony.
+            $content = preg_replace('~<\?php\s*// SPIDERCMS BOOKING RUNTIME SHORTCODE START.*?// SPIDERCMS BOOKING RUNTIME SHORTCODE END\s*\?>~s', '', $content);
+
+            // Zamień shortcode na bezpieczny HTML/JS embed.
+            if (strpos($content, '[booking') !== false) {
+                $embed = spidercms_booking_embed_html($depth);
+                $content = preg_replace('/\[booking(?:\s+id="[^"]*")?\]/i', $embed, $content);
+            }
+
+            if ($content !== $original) {
+                file_put_contents($file, $content, LOCK_EX);
+                $updated++;
+            }
+        }
+    }
+
+    return $updated;
+}
+
+function spidercms_booking_shortcode_html($depth = null) {
+    if ($depth === null) {
+        $depth = defined('ACTIVE_PAGES_DEPTH') ? (int)ACTIVE_PAGES_DEPTH : 1;
+    }
+    $depth = max(1, (int)$depth);
+    return "<?php require_once dirname(__DIR__, " . $depth . ") . '/booking-widget.php'; ?>";
+}
+
+function spidercms_booking_process_shortcodes_in_pages() {
+    spidercms_booking_create_widget_file();
+    spidercms_booking_create_embed_js_file();
+    spidercms_booking_cleanup_bad_autoload_footer();
+    return spidercms_booking_repair_pages_after_bad_shortcode();
+}
+
+spidercms_booking_create_widget_file();
+
+// Publiczne endpointy rezerwacji.
+$booking_public_action = $_GET['action'] ?? $_POST['action'] ?? '';
+
+if ($booking_public_action === 'booking_public_widget') {
+    spidercms_booking_create_widget_file();
+    if (file_exists(__DIR__ . '/booking-widget.php')) {
+        require __DIR__ . '/booking-widget.php';
+    }
+    exit;
+}
+
+if ($booking_public_action === 'booking_public_slots') {
+    header('Content-Type: application/json; charset=utf-8');
+    $date = $_GET['date'] ?? '';
+    echo json_encode([
+        'ok' => spidercms_booking_valid_date($date),
+        'slots' => spidercms_booking_valid_date($date) ? spidercms_booking_slots_for_date($date) : []
+    ], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
+if ($booking_public_action === 'booking_public_create') {
+    header('Content-Type: application/json; charset=utf-8');
+
+    if (($booking_settings['enabled'] ?? '1') !== '1') {
+        echo json_encode(['ok'=>false,'error'=>'Rezerwacje są aktualnie wyłączone.'], JSON_UNESCAPED_UNICODE);
+        exit;
+    }
+
+    if (!spidercms_booking_public_rate_limit()) {
+        echo json_encode(['ok'=>false,'error'=>'Zbyt wiele prób rezerwacji. Spróbuj później.'], JSON_UNESCAPED_UNICODE);
+        exit;
+    }
+
+    if (trim((string)($_POST['website'] ?? '')) !== '') {
+        echo json_encode(['ok'=>false,'error'=>'Rezerwacja odrzucona.'], JSON_UNESCAPED_UNICODE);
+        exit;
+    }
+
+    $date = $_POST['date'] ?? '';
+    $time = $_POST['time'] ?? '';
+    $name = spidercms_booking_clean($_POST['name'] ?? '', 120);
+    $email = spidercms_booking_clean($_POST['email'] ?? '', 160);
+    $phone = spidercms_booking_clean($_POST['phone'] ?? '', 80);
+    $message = spidercms_booking_clean($_POST['message'] ?? '', 1200);
+
+    if (!spidercms_booking_valid_date($date) || !spidercms_booking_valid_time($time)) {
+        echo json_encode(['ok'=>false,'error'=>'Wybierz poprawną datę i godzinę.'], JSON_UNESCAPED_UNICODE);
+        exit;
+    }
+    if ($name === '' || !filter_var($email, FILTER_VALIDATE_EMAIL)) {
+        echo json_encode(['ok'=>false,'error'=>'Podaj imię i poprawny e-mail.'], JSON_UNESCAPED_UNICODE);
+        exit;
+    }
+    if (($booking_settings['require_phone'] ?? '0') === '1' && $phone === '') {
+        echo json_encode(['ok'=>false,'error'=>'Telefon jest wymagany.'], JSON_UNESCAPED_UNICODE);
+        exit;
+    }
+    if (!in_array($time, spidercms_booking_slots_for_date($date), true)) {
+        echo json_encode(['ok'=>false,'error'=>'Ten termin nie jest już dostępny.'], JSON_UNESCAPED_UNICODE);
+        exit;
+    }
+
+    $reservations = spidercms_booking_load_reservations();
+    $id = 'res_' . date('YmdHis') . '_' . bin2hex(random_bytes(4));
+    $status = (($booking_settings['confirmation_mode'] ?? 'manual') === 'auto') ? 'confirmed' : 'new';
+
+    $reservation = [
+        'id' => $id,
+        'date' => $date,
+        'time' => $time,
+        'name' => $name,
+        'email' => $email,
+        'phone' => $phone,
+        'message' => $message,
+        'service' => $booking_settings['service_name'] ?? 'Rezerwacja',
+        'status' => $status,
+        'created_at' => date('Y-m-d H:i:s'),
+        'ip_hash' => hash('sha256', $_SERVER['REMOTE_ADDR'] ?? ''),
+    ];
+
+    $reservations[] = $reservation;
+    spidercms_booking_save_reservations($reservations);
+
+    $admin_email = trim((string)($booking_settings['admin_email'] ?? ''));
+    $subject = 'Nowa rezerwacja: ' . $date . ' ' . $time;
+    $body = "Nowa rezerwacja\n\nUsługa: {$reservation['service']}\nData: {$date}\nGodzina: {$time}\nImię: {$name}\nE-mail: {$email}\nTelefon: {$phone}\n\nWiadomość:\n{$message}\n";
+    if (($booking_settings['notify_admin'] ?? '1') === '1' && $admin_email !== '') {
+        spidercms_booking_send_email($admin_email, $subject, $body, $email);
+    }
+    if (($booking_settings['notify_client'] ?? '1') === '1') {
+        spidercms_booking_send_email(
+            $email,
+            'Potwierdzenie rezerwacji: ' . $date . ' ' . $time,
+            "Dzień dobry {$name},\n\nDziękujemy. Twoja rezerwacja została przyjęta.\n\nUsługa: {$reservation['service']}\nData: {$date}\nGodzina: {$time}\nStatus: {$status}\n\nW razie pytań odpowiedz na tę wiadomość.\n",
+            $admin_email
+        );
+    }
+
+    if (function_exists('spidercms_admin_log')) {
+        spidercms_admin_log('booking_created_public', ['date'=>$date,'time'=>$time]);
+    }
+
+    echo json_encode(['ok'=>true,'message'=>'Rezerwacja została zapisana.'], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
+// Akcje admina rezerwacji.
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_SESSION['logged_in']) && $_SESSION['logged_in'] === true) {
+    $booking_admin_action = $_POST['action'] ?? '';
+
+    if ($booking_admin_action === 'booking_save_settings') {
+        verify_csrf_or_die();
+
+        $booking_settings = [
+            'enabled' => isset($_POST['enabled']) ? '1' : '0',
+            'title' => spidercms_booking_clean($_POST['title'] ?? 'Zarezerwuj termin', 160),
+            'subtitle' => spidercms_booking_clean($_POST['subtitle'] ?? '', 300),
+            'service_name' => spidercms_booking_clean($_POST['service_name'] ?? 'Konsultacja', 120),
+            'slot_minutes' => (string)max(15, (int)($_POST['slot_minutes'] ?? 60)),
+            'days_ahead' => (string)max(1, (int)($_POST['days_ahead'] ?? 30)),
+            'min_notice_hours' => (string)max(0, (int)($_POST['min_notice_hours'] ?? 4)),
+            'work_days' => spidercms_booking_normalize_work_days(
+                $_POST['work_days']
+                ?? $_POST['booking_work_days']
+                ?? $_POST['days']
+                ?? $_POST['work_days_csv']
+                ?? []
+            ),
+            'work_start' => spidercms_booking_valid_time($_POST['work_start'] ?? '') ? $_POST['work_start'] : '09:00',
+            'work_end' => spidercms_booking_valid_time($_POST['work_end'] ?? '') ? $_POST['work_end'] : '17:00',
+            'admin_email' => spidercms_booking_clean($_POST['admin_email'] ?? '', 160),
+            'notify_admin' => isset($_POST['notify_admin']) ? '1' : '0',
+            'notify_client' => isset($_POST['notify_client']) ? '1' : '0',
+            'require_phone' => isset($_POST['require_phone']) ? '1' : '0',
+            'confirmation_mode' => in_array(($_POST['confirmation_mode'] ?? 'manual'), ['manual','auto'], true) ? $_POST['confirmation_mode'] : 'manual',
+            'email_mode' => in_array(($_POST['email_mode'] ?? 'smtp'), ['smtp','mail'], true) ? $_POST['email_mode'] : 'smtp',
+            'from_email' => spidercms_booking_clean($_POST['from_email'] ?? '', 160),
+            'from_name' => spidercms_booking_clean($_POST['from_name'] ?? 'SpiderCMS', 120),
+            'smtp_host' => spidercms_booking_clean($_POST['smtp_host'] ?? '', 160),
+            'smtp_port' => (string)max(1, (int)($_POST['smtp_port'] ?? 587)),
+            'smtp_secure' => in_array(($_POST['smtp_secure'] ?? 'tls'), ['tls','ssl','none'], true) ? $_POST['smtp_secure'] : 'tls',
+            'smtp_user' => spidercms_booking_clean($_POST['smtp_user'] ?? '', 180),
+            'smtp_pass' => (string)($_POST['smtp_pass'] ?? ($booking_settings['smtp_pass'] ?? '')),
+        ];
+
+        spidercms_booking_save_json($booking_settings_file, $booking_settings);
+        spidercms_booking_create_widget_file();
+        if (function_exists('spidercms_admin_log')) spidercms_admin_log('booking_settings_saved');
+        header('Location: admin.php?tab=bookings&saved=1');
+        exit;
+    }
+
+    if ($booking_admin_action === 'booking_update_status') {
+        verify_csrf_or_die();
+
+        $id = $_POST['id'] ?? '';
+        $status = $_POST['status'] ?? 'new';
+
+        if (!in_array($status, ['new','confirmed','cancelled','done'], true)) {
+            $status = 'new';
+        }
+
+        $items = spidercms_booking_load_reservations();
+        $confirmation_sent_now = false;
+
+        foreach ($items as &$r) {
+            if (($r['id'] ?? '') === $id) {
+                $old_status = $r['status'] ?? 'new';
+                $r['status'] = $status;
+                $r['updated_at'] = date('Y-m-d H:i:s');
+
+                // Jeżeli admin ręcznie potwierdza wizytę, wyślij e-mail do klienta.
+                // Nie wysyłamy ponownie, jeśli potwierdzenie było już wysłane wcześniej.
+                if (
+                    $status === 'confirmed'
+                    && $old_status !== 'confirmed'
+                    && empty($r['client_confirmation_sent_at'])
+                ) {
+                    $ok = spidercms_booking_send_confirmation_to_client($r);
+                    if ($ok) {
+                        $r['client_confirmation_sent_at'] = date('Y-m-d H:i:s');
+                        $confirmation_sent_now = true;
+                    }
+                }
+
+                break;
+            }
+        }
+        unset($r);
+
+        spidercms_booking_save_reservations($items);
+
+        if (function_exists('spidercms_admin_log')) {
+            spidercms_admin_log('booking_status_updated', [
+                'id' => $id,
+                'status' => $status,
+                'client_confirmation_sent' => $confirmation_sent_now ? '1' : '0'
+            ]);
+        }
+
+        header('Location: admin.php?tab=bookings&confirmed_mail=' . ($confirmation_sent_now ? '1' : '0'));
+        exit;
+    }
+
+    if ($booking_admin_action === 'booking_delete') {
+        verify_csrf_or_die();
+        $id = $_POST['id'] ?? '';
+        $items = array_values(array_filter(spidercms_booking_load_reservations(), fn($r) => ($r['id'] ?? '') !== $id));
+        spidercms_booking_save_reservations($items);
+        if (function_exists('spidercms_admin_log')) spidercms_admin_log('booking_deleted', ['id'=>$id]);
+        header('Location: admin.php?tab=bookings');
+        exit;
+    }
+
+
+    if ($booking_admin_action === 'booking_test_client_email') {
+        verify_csrf_or_die();
+        $test_email = spidercms_booking_clean($_POST['test_email'] ?? '', 160);
+        $ok = spidercms_booking_send_email(
+            $test_email,
+            'Test powiadomienia rezerwacji',
+            "To jest testowa wiadomość z modułu rezerwacji SpiderCMS.\n\nJeżeli ją widzisz, wysyłka e-mail działa poprawnie.",
+            trim((string)($booking_settings['admin_email'] ?? ''))
+        );
+        header('Location: admin.php?tab=bookings&emailtest=' . ($ok ? '1' : '0'));
+        exit;
+    }
+
+    if ($booking_admin_action === 'booking_add_blocked') {
+        verify_csrf_or_die();
+        $blocked = spidercms_booking_load_blocked();
+        $date = $_POST['date'] ?? '';
+        $from = $_POST['from'] ?? '';
+        $to = $_POST['to'] ?? '';
+        if (spidercms_booking_valid_date($date)) {
+            $blocked[] = [
+                'id' => 'blk_' . date('YmdHis') . '_' . bin2hex(random_bytes(3)),
+                'date' => $date,
+                'from' => spidercms_booking_valid_time($from) ? $from : '',
+                'to' => spidercms_booking_valid_time($to) ? $to : '',
+                'note' => spidercms_booking_clean($_POST['note'] ?? '', 160),
+            ];
+            spidercms_booking_save_json($booking_blocked_file, $blocked);
+        }
+        header('Location: admin.php?tab=bookings');
+        exit;
+    }
+
+    if ($booking_admin_action === 'booking_delete_blocked') {
+        verify_csrf_or_die();
+        $id = $_POST['id'] ?? '';
+        $blocked = array_values(array_filter(spidercms_booking_load_blocked(), fn($b) => ($b['id'] ?? '') !== $id));
+        spidercms_booking_save_json($booking_blocked_file, $blocked);
+        header('Location: admin.php?tab=bookings');
+        exit;
+    }
+
+    if ($booking_admin_action === 'booking_process_shortcodes') {
+        verify_csrf_or_die();
+        $updated = spidercms_booking_process_shortcodes_in_pages();
+        header('Location: admin.php?tab=bookings&shortcodes=' . (int)$updated);
+        exit;
+    }
+}
+
+// Panel rezerwacji.
+if (isset($_SESSION['logged_in']) && $_SESSION['logged_in'] === true && (($_GET['tab'] ?? '') === 'bookings')) {
+    $reservations = spidercms_booking_load_reservations();
+    usort($reservations, function($a, $b) {
+        return strcmp(($b['date'] ?? '') . ' ' . ($b['time'] ?? ''), ($a['date'] ?? '') . ' ' . ($a['time'] ?? ''));
+    });
+    $blocked = spidercms_booking_load_blocked();
+    $csrf = csrf_field();
+    $work_days = spidercms_booking_normalize_work_days($booking_settings['work_days'] ?? ['1','2','3','4','5']);
+
+    ?>
+    <!DOCTYPE html>
+    <html lang="pl">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Rezerwacje – SpiderCMS</title>
+        <style>
+            body{margin:0;font-family:system-ui,sans-serif;background:#0f172a;color:#f8fafc}
+            .booking-admin{display:grid;grid-template-columns:300px 1fr;min-height:100vh}
+            .booking-side{background:#111827;border-right:1px solid rgba(255,255,255,.1);padding:1.5rem;position:sticky;top:0;height:100vh;overflow:auto}
+            .booking-side a{display:block;color:#cbd5e1;text-decoration:none;padding:.8rem 1rem;border-radius:12px;margin:.35rem 0;background:rgba(255,255,255,.04)}
+            .booking-side a:hover{background:rgba(168,85,247,.18);color:white}
+            .booking-main{padding:1.5rem;overflow:auto}
+            .booking-grid{display:grid;grid-template-columns:1fr 1fr;gap:1rem}
+            .booking-card{background:#111827;border:1px solid rgba(255,255,255,.12);border-radius:20px;padding:1.2rem;box-shadow:0 18px 50px rgba(0,0,0,.18);margin-bottom:1rem}
+            .booking-card h2{margin-top:0}
+            label{display:block;margin:.75rem 0 .35rem;font-weight:800;color:#e2e8f0}
+            input,select,textarea{width:100%;box-sizing:border-box;border:1px solid #334155;background:#020617;color:#fff;border-radius:12px;padding:.8rem;font:inherit}
+            .check-row{display:flex;gap:.7rem;flex-wrap:wrap;margin:.8rem 0}
+            .check-row label{display:flex;gap:.35rem;align-items:center;margin:0;font-weight:700}
+            .check-row input{width:auto}
+            .btn{border:0;border-radius:999px;padding:.75rem 1rem;background:#a855f7;color:#fff;font-weight:900;cursor:pointer;text-decoration:none;display:inline-flex;align-items:center;gap:.35rem;margin:.15rem}
+            .btn.secondary{background:#334155}.btn.danger{background:#ef4444}.btn.ok{background:#22c55e}
+            table{width:100%;border-collapse:collapse;background:#0b1220;border-radius:16px;overflow:hidden}
+            th,td{padding:.75rem;border-bottom:1px solid rgba(255,255,255,.08);text-align:left;vertical-align:top}
+            th{color:#cbd5e1;background:#020617}
+            .status{display:inline-flex;border-radius:999px;padding:.25rem .6rem;font-weight:900;font-size:.8rem;background:#334155}
+            .status.confirmed{background:#166534}.status.cancelled{background:#7f1d1d}.status.done{background:#1e40af}.status.new{background:#7c2d12}
+            .notice{padding:.8rem 1rem;border-radius:14px;background:rgba(34,197,94,.14);border:1px solid rgba(34,197,94,.25);margin-bottom:1rem;color:#bbf7d0}
+            code{background:#020617;border:1px solid #334155;border-radius:8px;padding:.2rem .45rem}
+            @media(max-width:980px){.booking-admin{grid-template-columns:1fr}.booking-side{position:relative;height:auto}.booking-grid{grid-template-columns:1fr}table{display:block;overflow-x:auto;white-space:nowrap}.booking-main{padding:1rem}}
+        </style>
+    </head>
+    <body>
+    <div class="booking-admin">
+        <aside class="booking-side">
+            <h1>📅 Rezerwacje</h1>
+            <a href="admin.php?tab=dashboard">← Dashboard</a>
+            <a href="admin.php?tab=pages">Strony</a>
+<a href="admin.php?logout=1">Wyloguj</a>
+            <hr style="border-color:rgba(255,255,255,.1)">
+            <p style="color:#94a3b8">Shortcode:</p>
+            <code>[booking]</code>
+        </aside>
+
+        <main class="booking-main">
+            <h1>System rezerwacji</h1>
+
+            <?php if (isset($_GET['saved'])): ?><div class="notice">Zapisano ustawienia rezerwacji.</div><?php endif; ?>
+            <?php if (isset($_GET['confirmed_mail'])): ?>
+                <div class="notice">
+                    <?= $_GET['confirmed_mail'] === '1'
+                        ? 'Rezerwacja potwierdzona i wysłano e-mail do klienta.'
+                        : 'Status zapisany. E-mail potwierdzający nie został wysłany, bo nie był wymagany albo został już wysłany wcześniej.' ?>
+                </div>
+            <?php endif; ?>
+            <?php if (isset($_GET['shortcodes'])): ?><div class="notice">Przetworzono shortcode na stronach: <?= (int)$_GET['shortcodes'] ?></div><?php endif; ?>
+
+            <div class="booking-grid">
+                <section class="booking-card">
+                    <h2>Ustawienia</h2>
+                    <form method="post">
+                        <?= $csrf ?>
+                        <input type="hidden" name="action" value="booking_save_settings">
+
+                        <label><input type="checkbox" name="enabled" value="1" <?= (($booking_settings['enabled'] ?? '1') === '1') ? 'checked' : '' ?> style="width:auto"> Włącz rezerwacje</label>
+
+                        <label>Tytuł widgetu</label>
+                        <input name="title" value="<?= e($booking_settings['title'] ?? '') ?>">
+
+                        <label>Opis</label>
+                        <textarea name="subtitle" rows="2"><?= e($booking_settings['subtitle'] ?? '') ?></textarea>
+
+                        <label>Nazwa usługi</label>
+                        <input name="service_name" value="<?= e($booking_settings['service_name'] ?? '') ?>">
+
+                        <div class="booking-grid">
+                            <div>
+                                <label>Długość wizyty / slotu</label>
+                                <select name="slot_minutes">
+                                    <?php foreach ([15,30,45,60,90,120] as $m): ?>
+                                        <option value="<?= $m ?>" <?= ((int)($booking_settings['slot_minutes'] ?? 60) === $m) ? 'selected' : '' ?>><?= $m ?> min</option>
+                                    <?php endforeach; ?>
+                                </select>
+                            </div>
+                            <div>
+                                <label>Dni do przodu</label>
+                                <input type="number" name="days_ahead" min="1" max="365" value="<?= e($booking_settings['days_ahead'] ?? '30') ?>">
+                            </div>
+                        </div>
+
+                        <label>Dni pracy</label>
+                        <p style="color:#94a3b8;font-size:.9rem;margin:.4rem 0 1rem">
+                            Zapisane dni: <code><?= e(implode(',', spidercms_booking_normalize_work_days($booking_settings['work_days'] ?? []))) ?></code>
+                        </p>
+
+                        <input type="hidden" name="booking_work_days_marker" value="1">
+                        <input type="hidden" name="work_days_csv" value="">
+                        <div class="check-row">
+                            <?php $days = ['1'=>'Pon','2'=>'Wt','3'=>'Śr','4'=>'Czw','5'=>'Pt','6'=>'Sob','7'=>'Nd']; ?>
+                            <?php foreach ($days as $num=>$label): ?>
+                                <label><input type="checkbox" name="work_days[]" value="<?= $num ?>" <?= in_array($num, $work_days, true) ? 'checked' : '' ?>> <?= $label ?></label>
+                            <?php endforeach; ?>
+                        </div>
+
+                        <div class="booking-grid">
+                            <div>
+                                <label>Od</label>
+                                <input type="time" name="work_start" value="<?= e($booking_settings['work_start'] ?? '09:00') ?>">
+                            </div>
+                            <div>
+                                <label>Do</label>
+                                <input type="time" name="work_end" value="<?= e($booking_settings['work_end'] ?? '17:00') ?>">
+                            </div>
+                        </div>
+
+                        <label>Minimalne wyprzedzenie (godziny)</label>
+                        <input type="number" name="min_notice_hours" min="0" max="168" value="<?= e($booking_settings['min_notice_hours'] ?? '4') ?>">
+
+                        <label>E-mail administratora</label>
+                        <input type="email" name="admin_email" value="<?= e($booking_settings['admin_email'] ?? '') ?>">
+
+                        <label><input type="checkbox" name="notify_admin" value="1" <?= (($booking_settings['notify_admin'] ?? '1') === '1') ? 'checked' : '' ?> style="width:auto"> Powiadom admina</label>
+                        <label><input type="checkbox" name="notify_client" value="1" <?= (($booking_settings['notify_client'] ?? '1') === '1') ? 'checked' : '' ?> style="width:auto"> Potwierdzenie do klienta</label>
+                        <label><input type="checkbox" name="require_phone" value="1" <?= (($booking_settings['require_phone'] ?? '0') === '1') ? 'checked' : '' ?> style="width:auto"> Telefon wymagany</label>
+
+                        <label>Tryb potwierdzania</label>
+                        <select name="confirmation_mode">
+                            <option value="manual" <?= (($booking_settings['confirmation_mode'] ?? 'manual') === 'manual') ? 'selected' : '' ?>>Ręczne</option>
+                            <option value="auto" <?= (($booking_settings['confirmation_mode'] ?? 'manual') === 'auto') ? 'selected' : '' ?>>Automatyczne</option>
+                        </select>
+
+                        <button class="btn" type="submit">Zapisz ustawienia</button>
+                    </form>
+
+                    <form method="post" style="margin-top:1rem">
+                        <?= $csrf ?>
+                        <input type="hidden" name="action" value="booking_test_client_email">
+                        <label>Test wiadomości do klienta</label>
+                        <input type="email" name="test_email" placeholder="adres testowy klienta" required>
+                        <button class="btn secondary" type="submit">Wyślij test do klienta</button>
+                    </form>
+                </section>
+
+                <section class="booking-card">
+                    <h2>Blokady terminów</h2>
+                    <form method="post">
+                        <?= $csrf ?>
+                        <input type="hidden" name="action" value="booking_add_blocked">
+                        <label>Data</label>
+                        <input type="date" name="date" required>
+                        <div class="booking-grid">
+                            <div><label>Od</label><input type="time" name="from"></div>
+                            <div><label>Do</label><input type="time" name="to"></div>
+                        </div>
+                        <label>Notatka</label>
+                        <input name="note" placeholder="np. urlop, spotkanie">
+                        <button class="btn secondary" type="submit">Dodaj blokadę</button>
+                    </form>
+
+                    <h3>Aktualne blokady</h3>
+                    <table>
+                        <thead><tr><th>Data</th><th>Godziny</th><th>Notatka</th><th></th></tr></thead>
+                        <tbody>
+                        <?php foreach ($blocked as $b): ?>
+                            <tr>
+                                <td><?= e($b['date'] ?? '') ?></td>
+                                <td><?= e(($b['from'] ?? '') . ' - ' . ($b['to'] ?? '')) ?></td>
+                                <td><?= e($b['note'] ?? '') ?></td>
+                                <td>
+                                    <form method="post" onsubmit="return confirm('Usunąć blokadę?')">
+                                        <?= $csrf ?>
+                                        <input type="hidden" name="action" value="booking_delete_blocked">
+                                        <input type="hidden" name="id" value="<?= e($b['id'] ?? '') ?>">
+                                        <button class="btn danger" type="submit">Usuń</button>
+                                    </form>
+                                </td>
+                            </tr>
+                        <?php endforeach; ?>
+                        </tbody>
+                    </table>
+
+                    <h3>Wstawienie na stronę</h3>
+                    <p>W treści strony wklej:</p>
+                    <code>[booking]</code>
+                    <form method="post" style="margin-top:1rem">
+                        <?= $csrf ?>
+                        <input type="hidden" name="action" value="booking_process_shortcodes">
+                        <button class="btn ok" type="submit">Przetwórz shortcode na stronach</button>
+                    </form>
+                </section>
+            </div>
+
+            <section class="booking-card">
+                <h2>Lista rezerwacji</h2>
+                <table>
+                    <thead>
+                    <tr>
+                        <th>Termin</th><th>Klient</th><th>Kontakt</th><th>Wiadomość</th><th>Status</th><th>Akcje</th>
+                    </tr>
+                    </thead>
+                    <tbody>
+                    <?php foreach ($reservations as $r): ?>
+                        <tr>
+                            <td><strong><?= e($r['date'] ?? '') ?></strong><br><?= e($r['time'] ?? '') ?></td>
+                            <td><?= e($r['name'] ?? '') ?><br><small><?= e($r['service'] ?? '') ?></small></td>
+                            <td><?= e($r['email'] ?? '') ?><br><?= e($r['phone'] ?? '') ?></td>
+                            <td><?= e($r['message'] ?? '') ?></td>
+                            <td>
+                                <span class="status <?= e($r['status'] ?? 'new') ?>"><?= e($r['status'] ?? 'new') ?></span>
+                                <?php if (!empty($r['client_confirmation_sent_at'])): ?>
+                                    <br><small>Potwierdzenie klienta: <?= e($r['client_confirmation_sent_at']) ?></small>
+                                <?php endif; ?>
+                            </td>
+                            <td>
+                                <form method="post" style="display:inline-block">
+                                    <?= $csrf ?>
+                                    <input type="hidden" name="action" value="booking_update_status">
+                                    <input type="hidden" name="id" value="<?= e($r['id'] ?? '') ?>">
+                                    <select name="status" onchange="this.form.submit()">
+                                        <?php foreach (['new'=>'Nowa','confirmed'=>'Potwierdzona','done'=>'Zrealizowana','cancelled'=>'Anulowana'] as $k=>$v): ?>
+                                            <option value="<?= $k ?>" <?= (($r['status'] ?? 'new') === $k) ? 'selected' : '' ?>><?= $v ?></option>
+                                        <?php endforeach; ?>
+                                    </select>
+                                </form>
+                                <form method="post" style="display:inline-block" onsubmit="return confirm('Usunąć rezerwację?')">
+                                    <?= $csrf ?>
+                                    <input type="hidden" name="action" value="booking_delete">
+                                    <input type="hidden" name="id" value="<?= e($r['id'] ?? '') ?>">
+                                    <button class="btn danger" type="submit">Usuń</button>
+                                </form>
+                            </td>
+                        </tr>
+                    <?php endforeach; ?>
+                    <?php if (!$reservations): ?>
+                        <tr><td colspan="6">Brak rezerwacji.</td></tr>
+                    <?php endif; ?>
+                    </tbody>
+                </table>
+            </section>
+        </main>
+    </div>
+    
+<script>
+(function(){
+    document.querySelectorAll('form').forEach(function(form){
+        if(!form.querySelector('input[name="work_days[]"]')) return;
+        form.addEventListener('submit', function(){
+            var hidden = form.querySelector('input[name="work_days_csv"]');
+            if(!hidden) return;
+            var vals = Array.from(form.querySelectorAll('input[name="work_days[]"]:checked')).map(function(i){ return i.value; });
+            hidden.value = vals.join(',');
+        });
+    });
+})();
+</script>
+
+</body>
+    </html>
+    <?php
+    exit;
+}
+// SPIDERCMS BOOKING SYSTEM END
+
+
+// ----------------------------------------------------------------------
 // Publiczne endpointy czatu – działają bez logowania do panelu
 // ----------------------------------------------------------------------
 $public_action = $_POST['action'] ?? $_GET['action'] ?? '';
@@ -3763,6 +5085,7 @@ if (!isset($_SESSION['logged_in']) || $_SESSION['logged_in'] !== true) {
 // Panel zalogowany
 // ----------------------------------------------------------------------
 $tab = $_GET['tab'] ?? 'dashboard';
+$spidercms_is_page_edit_mode = isset($_GET['edit']) || isset($_GET['edit_page']) || (($_GET['action'] ?? '') === 'edit') || (($_GET['mode'] ?? '') === 'edit');
 
 // ----------------------------------------------------------------------
 // Eksport logów akcji administratora
@@ -5955,6 +7278,19 @@ function render_editor_tools() {
 /* SPIDERCMS LIVE BUTTON FIX END */
 
 </style>
+
+<?php if (!empty($spidercms_is_page_edit_mode)): ?>
+<style>
+/* SPIDERCMS SERVER HIDE CREATE PAGE IN EDIT MODE */
+.spidercms-create-page-only,
+form[data-spidercms-purpose="create-page"],
+.card[data-spidercms-purpose="create-page"],
+section[data-spidercms-purpose="create-page"]{
+    display:none!important;
+}
+</style>
+<?php endif; ?>
+
 </head>
 <body>
 <div class="spidercms-mobile-topbar">
@@ -6072,7 +7408,7 @@ function render_editor_tools() {
                 </div>
                 <p style="color:#94a3b8;"><?= count($chat_conversations ?? []) ?> rozmów, <?= (int)($chat_unread ?? 0) ?> nowych</p>
             </div>
-            <div class="dash-card">
+            <div class="dash-card spidercms-create-page-only" data-spidercms-purpose="create-page">
                 <h3>Szybkie akcje</h3>
                 <div style="margin-top:1rem; display:flex; flex-direction:column; gap:0.8rem;">
                     <a href="admin.php?tab=strony" class="btn btn-view" style="text-align:center; justify-content:center;">
@@ -6874,7 +8210,7 @@ function render_editor_tools() {
                     <h3><i class="fa-solid fa-shield-halved"></i> Bezpieczeństwo</h3>
                     <p>Zmiana hasła administratora i podstawowe informacje o zabezpieczeniach panelu.</p>
                 </div>
-                <div class="settings-security-box">
+                <div class="settings-security-box spidercms-create-page-only" data-spidercms-purpose="create-page">
                     <h3 style="margin-top:0; color: #f87171;"><i class="fa-solid fa-key"></i> Zmiana hasła administratora</h3>
                     <p style="color:#94a3b8; margin-bottom:1.5rem;">Zalecane co 3–6 miesięcy. Wymagane stare hasło.</p>
                     <form method="post">
@@ -7267,7 +8603,7 @@ function render_editor_tools() {
         <?php endif; ?>
         <div class="card">
             <h2>Nowa strona</h2>
-            <form method="post">
+            <form data-spidercms-purpose="create-page" method="post">
                 <input type="hidden" name="action" value="create">
                 <label>Slug (adres URL)</label>
                 <input type="text" name="slug" required pattern="[a-z0-9\-_]+" placeholder="np. kontakt">
@@ -7288,6 +8624,74 @@ function render_editor_tools() {
             </form>
         </div>
     <?php endif; ?>
+
+
+<?php if (isset($_SESSION['logged_in']) && $_SESSION['logged_in'] === true && (($tab ?? '') === 'dashboard') && function_exists('spidercms_booking_stats_summary')): ?>
+<?php $spidercms_booking_dash = spidercms_booking_stats_summary(); ?>
+<div class="card spidercms-booking-dashboard-card">
+    <h2>📅 Rezerwacje</h2>
+    <p class="muted">Szybkie podsumowanie systemu rezerwacji.</p>
+    <div class="spidercms-booking-dashboard-grid">
+        <div><strong><?= (int)$spidercms_booking_dash['all'] ?></strong><span>Wszystkie</span></div>
+        <div><strong><?= (int)$spidercms_booking_dash['new'] ?></strong><span>Nowe</span></div>
+        <div><strong><?= (int)$spidercms_booking_dash['today'] ?></strong><span>Dzisiaj</span></div>
+        <div><strong><?= (int)$spidercms_booking_dash['upcoming'] ?></strong><span>Nadchodzące</span></div>
+    </div>
+    <a class="btn" href="admin.php?tab=bookings">Przejdź do rezerwacji</a>
+</div>
+<style>
+.spidercms-booking-dashboard-card{margin-top:1rem}
+.spidercms-booking-dashboard-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:.8rem;margin:1rem 0}
+.spidercms-booking-dashboard-grid div{padding:1rem;border-radius:16px;background:rgba(168,85,247,.12);border:1px solid rgba(168,85,247,.22)}
+.spidercms-booking-dashboard-grid strong{display:block;font-size:1.9rem;color:#fff}
+.spidercms-booking-dashboard-grid span{display:block;color:#cbd5e1;font-weight:700}
+@media(max-width:800px){.spidercms-booking-dashboard-grid{grid-template-columns:repeat(2,1fr)}}
+@media(max-width:480px){.spidercms-booking-dashboard-grid{grid-template-columns:1fr}}
+
+
+/* SPIDERCMS BOOKING MENU ITEM */
+.nav a[href*="tab=bookings"]{
+    position:relative;
+}
+
+
+
+/* SPIDERCMS EDITOR FOCUS HIGHLIGHT START */
+.spidercms-edit-focus-pulse{
+    animation: spidercmsEditPulse 1.5s ease 0s 2;
+    box-shadow:0 0 0 4px rgba(168,85,247,.35), 0 18px 50px rgba(168,85,247,.18)!important;
+}
+@keyframes spidercmsEditPulse{
+    0%{box-shadow:0 0 0 0 rgba(168,85,247,.55)}
+    70%{box-shadow:0 0 0 12px rgba(168,85,247,0)}
+    100%{box-shadow:0 0 0 0 rgba(168,85,247,0)}
+}
+/* SPIDERCMS EDITOR FOCUS HIGHLIGHT END */
+
+
+
+
+
+
+
+/* SPIDERCMS HIDE NEW PAGE WHILE EDITING CSS START */
+.spidercms-hidden-new-page-during-edit{
+    display:none!important;
+}
+.spidercms-edit-mode-notice{
+    margin:0 0 14px;
+    padding:12px 14px;
+    border-radius:14px;
+    background:rgba(34,197,94,.12);
+    border:1px solid rgba(34,197,94,.28);
+    color:#bbf7d0;
+    font-weight:800;
+}
+/* SPIDERCMS HIDE NEW PAGE WHILE EDITING CSS END */
+
+</style>
+<?php endif; ?>
+
 </main>
 <script>
 document.querySelectorAll('input[type="color"]').forEach(function(input){
@@ -7754,6 +9158,276 @@ document.addEventListener('DOMContentLoaded', function(){
     });
 })();
 /* SPIDERCMS LIVE EDITOR FALLBACK BUTTON END */
+</script>
+
+
+
+
+
+
+
+
+<script>
+/* SPIDERCMS AUTO SCROLL TO EDITOR START */
+(function(){
+    function ready(fn){
+        if(document.readyState !== 'loading') fn();
+        else document.addEventListener('DOMContentLoaded', fn);
+    }
+
+    function hasEditIntent(){
+        const q = new URLSearchParams(window.location.search);
+        return q.has('edit') || q.has('page') || q.get('action') === 'edit' || q.get('mode') === 'edit';
+    }
+
+    function findEditorTarget(){
+        return document.querySelector('#page_content') ||
+               document.querySelector('textarea[name="content"]') ||
+               document.querySelector('textarea[name="page_content"]') ||
+               document.querySelector('.tox-tinymce') ||
+               document.querySelector('.tox') ||
+               document.querySelector('[data-editor]') ||
+               document.querySelector('form textarea');
+    }
+
+    function findEditorCard(target){
+        if(!target) return null;
+        return target.closest('.card,.panel-card,.settings-card,.box,form') || target;
+    }
+
+    ready(function(){
+        if(!hasEditIntent()) return;
+
+        setTimeout(function(){
+            const target = findEditorTarget();
+            if(!target) return;
+
+            const card = findEditorCard(target);
+            const y = Math.max(0, card.getBoundingClientRect().top + window.scrollY - 20);
+
+            window.scrollTo({
+                top: y,
+                behavior: 'smooth'
+            });
+
+            card.classList.add('spidercms-edit-focus-pulse');
+            setTimeout(function(){
+                card.classList.remove('spidercms-edit-focus-pulse');
+            }, 3400);
+
+            // Jeśli TinyMCE jest już aktywny, ustaw fokus w edytorze.
+            setTimeout(function(){
+                try{
+                    if(window.tinymce && tinymce.activeEditor){
+                        tinymce.activeEditor.focus();
+                    }else if(target.focus){
+                        target.focus();
+                    }
+                }catch(e){}
+            }, 700);
+        }, 500);
+    });
+
+    // Dodatkowo: po kliknięciu "Edytuj" zapamiętaj, że następna strona ma przewinąć do edytora.
+    ready(function(){
+        document.querySelectorAll('a,button').forEach(function(el){
+            const text = (el.textContent || '').trim().toLowerCase();
+            const href = el.getAttribute && (el.getAttribute('href') || '');
+            if(text.includes('edytuj') && !text.includes('live')){
+                el.addEventListener('click', function(){
+                    try{ sessionStorage.setItem('spidercms_scroll_editor_once','1'); }catch(e){}
+                });
+            }
+        });
+
+        let shouldScroll = false;
+        try{
+            shouldScroll = sessionStorage.getItem('spidercms_scroll_editor_once') === '1';
+            if(shouldScroll) sessionStorage.removeItem('spidercms_scroll_editor_once');
+        }catch(e){}
+
+        if(!shouldScroll || hasEditIntent()) return;
+
+        setTimeout(function(){
+            const target = findEditorTarget();
+            if(!target) return;
+            const card = findEditorCard(target);
+            const y = Math.max(0, card.getBoundingClientRect().top + window.scrollY - 20);
+            window.scrollTo({top:y,behavior:'smooth'});
+            card.classList.add('spidercms-edit-focus-pulse');
+            setTimeout(function(){card.classList.remove('spidercms-edit-focus-pulse');},3400);
+        }, 500);
+    });
+})();
+/* SPIDERCMS AUTO SCROLL TO EDITOR END */
+</script>
+
+
+
+
+
+<script>
+/* SPIDERCMS HIDE NEW PAGE WHILE EDITING START */
+(function(){
+    function ready(fn){
+        if(document.readyState !== 'loading') fn();
+        else document.addEventListener('DOMContentLoaded', fn);
+    }
+
+    function isEditingPage(){
+        const q = new URLSearchParams(window.location.search);
+        return q.has('edit') ||
+               q.has('edit_page') ||
+               q.get('action') === 'edit' ||
+               q.get('action') === 'edit_page' ||
+               q.get('mode') === 'edit';
+    }
+
+    function lowerText(el){
+        return (el && el.textContent ? el.textContent : '').toLowerCase();
+    }
+
+    function hideBlock(el){
+        if(!el) return;
+        const block = el.closest('.card,.panel-card,.settings-card,.box,.section,section,.form-card,.widget-card') || el.closest('form') || el;
+        block.classList.add('spidercms-hidden-new-page-during-edit');
+    }
+
+    ready(function(){
+        if(!isEditingPage()) return;
+
+        // 1. Ukryj formularze, które są jednoznacznie formularzami tworzenia strony.
+        document.querySelectorAll('form').forEach(function(form){
+            const txt = lowerText(form);
+            const action = form.querySelector('input[name="action"]');
+            const actionValue = action ? String(action.value || '').toLowerCase() : '';
+
+            const hasCreateAction =
+                ['create','add','add_page','new_page','create_page','save_new_page'].includes(actionValue);
+
+            const hasCreateLabels =
+                txt.includes('dodaj nową stronę') ||
+                txt.includes('dodaj nowa strone') ||
+                txt.includes('dodaj stronę') ||
+                txt.includes('dodaj strone') ||
+                txt.includes('nowa strona') ||
+                txt.includes('utwórz stronę') ||
+                txt.includes('utworz strone') ||
+                txt.includes('stwórz stronę') ||
+                txt.includes('stworz strone');
+
+            const hasCreateButton = Array.from(form.querySelectorAll('button,input[type="submit"],.btn')).some(function(btn){
+                const b = lowerText(btn);
+                const v = (btn.value || '').toLowerCase();
+                return b.includes('dodaj') ||
+                       b.includes('utwórz') ||
+                       b.includes('utworz') ||
+                       b.includes('stwórz') ||
+                       b.includes('stworz') ||
+                       v.includes('dodaj') ||
+                       v.includes('utwórz') ||
+                       v.includes('utworz');
+            });
+
+            const looksLikeEdit =
+                txt.includes('edytuj stronę') ||
+                txt.includes('edytuj strone') ||
+                txt.includes('zapisz zmiany') ||
+                txt.includes('aktualizuj stronę') ||
+                txt.includes('aktualizuj strone');
+
+            // Ukryj tylko tworzenie, nie formularz edycji.
+            if ((hasCreateAction || hasCreateLabels || hasCreateButton) && !looksLikeEdit) {
+                hideBlock(form);
+            }
+        });
+
+        // 2. Ukryj całe karty z nagłówkiem "Dodaj nową stronę", nawet jeżeli formularz ma nietypową akcję.
+        document.querySelectorAll('.card,.panel-card,.settings-card,.box,section').forEach(function(card){
+            const txt = lowerText(card);
+            const hasNewTitle =
+                txt.includes('dodaj nową stronę') ||
+                txt.includes('dodaj nowa strone') ||
+                txt.includes('nowa strona') ||
+                txt.includes('utwórz stronę') ||
+                txt.includes('utworz strone');
+
+            const hasEditor =
+                card.querySelector('#page_content') ||
+                card.querySelector('textarea[name="content"]') ||
+                card.querySelector('textarea[name="page_content"]') ||
+                card.querySelector('.tox-tinymce');
+
+            const looksLikeEdit =
+                txt.includes('edytuj stronę') ||
+                txt.includes('edytuj strone') ||
+                txt.includes('zapisz zmiany');
+
+            if(hasNewTitle && !hasEditor && !looksLikeEdit){
+                card.classList.add('spidercms-hidden-new-page-during-edit');
+            }
+        });
+
+        // 3. Informacja nad edytorem.
+        const editor = document.querySelector('#page_content, textarea[name="content"], textarea[name="page_content"], .tox-tinymce, .tox');
+        if(editor && !document.querySelector('.spidercms-edit-mode-notice')){
+            const container = editor.closest('.card,.panel-card,.settings-card,.box,form') || editor.parentElement;
+            if(container){
+                const notice = document.createElement('div');
+                notice.className = 'spidercms-edit-mode-notice';
+                notice.textContent = 'Tryb edycji istniejącej strony — formularz dodawania nowej strony jest ukryty.';
+                container.insertBefore(notice, container.firstChild);
+            }
+        }
+    });
+})();
+/* SPIDERCMS HIDE NEW PAGE WHILE EDITING END */
+</script>
+
+
+
+<script>
+/* SPIDERCMS FINAL HIDE DUPLICATE PAGE FORMS START */
+(function(){
+    function ready(fn){ if(document.readyState !== 'loading') fn(); else document.addEventListener('DOMContentLoaded', fn); }
+    ready(function(){
+        const q = new URLSearchParams(location.search);
+        const editMode = q.has('edit') || q.has('edit_page') || q.get('action') === 'edit' || q.get('mode') === 'edit';
+        if(!editMode) return;
+
+        // Ukryj wszystko oznaczone po stronie PHP.
+        document.querySelectorAll('[data-spidercms-purpose="create-page"], .spidercms-create-page-only').forEach(el => {
+            const box = el.closest('.card,.box,.panel-card,.settings-card,section') || el;
+            box.style.setProperty('display','none','important');
+        });
+
+        // Jeżeli nadal są dwa formularze z polami tytuł/slug/content, zostaw pierwszy z edytorem jako formularz edycji.
+        const pageForms = Array.from(document.querySelectorAll('form')).filter(form => {
+            const hasContent = form.querySelector('textarea[name="content"], textarea[name="page_content"], #page_content');
+            const hasTitle = form.querySelector('input[name="title"], input[name="page_title"]');
+            const hasSlug = form.querySelector('input[name="slug"], input[name="page_slug"]');
+            return hasContent || (hasTitle && hasSlug);
+        });
+
+        if(pageForms.length > 1){
+            pageForms.slice(1).forEach(form => {
+                const box = form.closest('.card,.box,.panel-card,.settings-card,section') || form;
+                box.style.setProperty('display','none','important');
+            });
+        }
+
+        // Ukryj karty z nagłówkiem dodawania po samym tytule.
+        document.querySelectorAll('.card,.box,.panel-card,.settings-card,section').forEach(box => {
+            const t = (box.textContent || '').toLowerCase();
+            const isAdd = t.includes('dodaj nową stronę') || t.includes('dodaj nowa strone') || t.includes('nowa strona') || t.includes('utwórz stronę') || t.includes('utworz strone');
+            const isEdit = t.includes('edytuj stronę') || t.includes('edytuj strone');
+            if(isAdd && !isEdit){
+                box.style.setProperty('display','none','important');
+            }
+        });
+    });
+})();
+/* SPIDERCMS FINAL HIDE DUPLICATE PAGE FORMS END */
 </script>
 
 </body>
