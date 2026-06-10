@@ -3198,6 +3198,48 @@ function spidercms_live_create_backup($path) {
     return @copy($path, $backup_dir . '/' . $name);
 }
 
+
+function spidercms_live_prepare_content_for_editor($html) {
+    $html = (string)$html;
+
+    // W edytorze LIVE nie pokazujemy linków administracyjnych Rezerwacje, jeśli zostały kiedyś błędnie wstrzyknięte.
+    $html = preg_replace('~<a\s+[^>]*href=["\']admin\.php\?tab=bookings["\'][^>]*>.*?Rezerwacje.*?</a>~is', '', $html);
+
+    $html = preg_replace(
+        '/\[booking(?:\s+id="([^"]*)")?\]/i',
+        '<div class="spidercms-live-module-placeholder" data-spidercms-shortcode="[booking]" contenteditable="false">📅 Moduł rezerwacji<br><small>Ten blok jest aktywny na stronie publicznej. W edytorze LIVE pokazujemy tylko placeholder.</small></div>',
+        $html
+    );
+
+    $html = preg_replace(
+        '~<div\s+[^>]*data-spidercms-booking[^>]*>.*?</div>\s*(?:<script[^>]*booking-embed\.js[^>]*></script>)?~is',
+        '<div class="spidercms-live-module-placeholder" data-spidercms-shortcode="[booking]" contenteditable="false">📅 Moduł rezerwacji<br><small>Ten blok jest aktywny na stronie publicznej. W edytorze LIVE pokazujemy tylko placeholder.</small></div>',
+        $html
+    );
+
+    $html = preg_replace('~<script\b[^>]*booking[^>]*>.*?</script>~is', '', $html);
+
+    return $html;
+}
+
+function spidercms_live_restore_shortcodes_from_editor($html) {
+    $html = (string)$html;
+
+    $html = preg_replace(
+        '~<div\s+[^>]*data-spidercms-shortcode="\[booking\]"[^>]*>.*?</div>~is',
+        '[booking]',
+        $html
+    );
+
+    $html = preg_replace(
+        '~<div\s+[^>]*data-spidercms-booking[^>]*>.*?</div>\s*(?:<script[^>]*booking-embed\.js[^>]*></script>)?~is',
+        '[booking]',
+        $html
+    );
+
+    return $html;
+}
+
 function spidercms_live_sanitize_html($html) {
     $html = (string)$html;
 
@@ -3212,6 +3254,7 @@ function spidercms_live_sanitize_html($html) {
 
 function spidercms_live_save_content_to_page($path, $new_content) {
     $source = (string)file_get_contents($path);
+    $new_content = spidercms_live_restore_shortcodes_from_editor($new_content);
     $new_content = spidercms_live_sanitize_html($new_content);
 
     if (($GLOBALS['live_settings']['backup_enabled'] ?? '1') === '1') {
@@ -3307,7 +3350,7 @@ if (($_GET['action'] ?? '') === 'live_editor') {
 
     $source = (string)file_get_contents($path);
     $title = spidercms_live_extract_title($source, $file);
-    $content = spidercms_live_extract_content($source);
+    $content = spidercms_live_prepare_content_for_editor(spidercms_live_extract_content($source));
     $preview_url = spidercms_live_page_url($file);
     $token = csrf_token();
 
@@ -3358,6 +3401,10 @@ if (($_GET['action'] ?? '') === 'live_editor') {
             .live-status{font-size:.9rem;color:#cbd5e1}
             .live-preview-link{color:#93c5fd}
 
+            .spidercms-live-module-placeholder{padding:1.4rem;border:2px dashed #a855f7;border-radius:18px;background:#f5f3ff;color:#4c1d95;text-align:center;font-weight:900;margin:1rem 0}
+            .spidercms-live-module-placeholder small{display:block;margin-top:.35rem;color:#6d28d9;font-weight:700}
+
+
             /* LIVE EXTRA TOOLS */
             .live-tool-section{margin-top:1rem;padding-top:1rem;border-top:1px solid rgba(255,255,255,.12)}
             .live-mini-grid{display:grid;grid-template-columns:1fr 1fr;gap:.5rem}
@@ -3392,9 +3439,8 @@ if (($_GET['action'] ?? '') === 'live_editor') {
             </div>
             <div class="live-actions">
                 <a class="live-btn light" href="admin.php?tab=pages">← Wróć</a>
-            <a class="<?= (($tab ?? '') === 'bookings') ? 'active' : '' ?>" href="admin.php?tab=bookings">📅 Rezerwacje</a>
-            <a class="<?= ($tab ?? '') === 'bookings' ? 'active' : '' ?>" href="admin.php?tab=bookings">📅 Rezerwacje</a>
-                <button class="live-btn dark" type="button" onclick="document.execCommand('bold')">B</button>
+
+<button class="live-btn dark" type="button" onclick="document.execCommand('bold')">B</button>
                 <button class="live-btn dark" type="button" onclick="document.execCommand('italic')"><i>I</i></button>
                 <button class="live-btn dark" type="button" onclick="document.execCommand('formatBlock', false, 'h2')">H2</button>
                 <button class="live-btn dark" type="button" onclick="document.execCommand('formatBlock', false, 'p')">P</button>
@@ -3624,7 +3670,12 @@ if (($_GET['action'] ?? '') === 'live_editor') {
             saveBtn.disabled = true;
             setStatus('Zapisywanie...');
             fetch('admin.php', { method: 'POST', body: fd, credentials: 'same-origin' })
-            .then(r => r.json())
+            .then(function(r){
+                return r.text().then(function(txt){
+                    try { return JSON.parse(txt); }
+                    catch(e) { return {ok:false, message:'Błąd odpowiedzi serwera: ' + txt.substring(0,160)}; }
+                });
+            })
             .then(d => {
                 saveBtn.disabled = false;
                 setStatus(d.message || (d.ok ? 'Zapisano.' : 'Błąd zapisu.'));
@@ -9428,6 +9479,24 @@ document.addEventListener('DOMContentLoaded', function(){
     });
 })();
 /* SPIDERCMS FINAL HIDE DUPLICATE PAGE FORMS END */
+</script>
+
+
+
+<script>
+/* SPIDERCMS LIVE REMOVE WRONG BOOKING LINKS START */
+(function(){
+    function ready(fn){
+        if(document.readyState !== 'loading') fn();
+        else document.addEventListener('DOMContentLoaded', fn);
+    }
+    ready(function(){
+        document.querySelectorAll('.live-topbar a[href*="tab=bookings"], .live-actions a[href*="tab=bookings"]').forEach(function(a){
+            a.remove();
+        });
+    });
+})();
+/* SPIDERCMS LIVE REMOVE WRONG BOOKING LINKS END */
 </script>
 
 </body>
