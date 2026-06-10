@@ -6912,408 +6912,7 @@ function render_editor_tools() {
         }
 
 
-/* SPIDERCMS MOBILE HARD FIX START */
-:root{
-    --spidercms-mobile-sidebar-width: min(330px, 88vw);
-}
 
-.spidercms-mobile-topbar,
-.spidercms-mobile-backdrop{
-    display:none;
-}
-
-@media (max-width: 1024px){
-    html,
-    body{
-        width:100%!important;
-        max-width:100%!important;
-        overflow-x:hidden!important;
-    }
-
-    body{
-        min-width:0!important;
-    }
-
-    .spidercms-mobile-topbar{
-        display:flex!important;
-        position:fixed!important;
-        top:0!important;
-        left:0!important;
-        right:0!important;
-        height:58px!important;
-        z-index:2147483000!important;
-        align-items:center!important;
-        gap:10px!important;
-        padding:8px 12px!important;
-        background:linear-gradient(135deg,#0f172a,#1e293b)!important;
-        color:#fff!important;
-        box-shadow:0 10px 30px rgba(0,0,0,.28)!important;
-    }
-
-    .spidercms-mobile-btn{
-        width:42px!important;
-        height:42px!important;
-        min-width:42px!important;
-        border:0!important;
-        border-radius:13px!important;
-        background:linear-gradient(135deg,#a855f7,#2563eb)!important;
-        color:#fff!important;
-        font-size:24px!important;
-        line-height:1!important;
-        font-weight:900!important;
-        display:flex!important;
-        align-items:center!important;
-        justify-content:center!important;
-        cursor:pointer!important;
-        padding:0!important;
-        margin:0!important;
-    }
-
-    .spidercms-mobile-title{
-        font-size:15px!important;
-        font-weight:800!important;
-        white-space:nowrap!important;
-        overflow:hidden!important;
-        text-overflow:ellipsis!important;
-    }
-
-    .spidercms-mobile-backdrop{
-        position:fixed!important;
-        inset:0!important;
-        background:rgba(2,6,23,.66)!important;
-        z-index:2147482990!important;
-    }
-
-    body.spidercms-menu-open .spidercms-mobile-backdrop{
-        display:block!important;
-    }
-
-    /* Najczęstsze wrappery panelu */
-    .layout,
-    .admin-layout,
-    .panel-layout,
-    .dashboard-layout,
-    .app-layout,
-    body > .layout,
-    body > .admin-layout{
-        display:block!important;
-        grid-template-columns:1fr!important;
-        width:100%!important;
-        max-width:100%!important;
-        min-width:0!important;
-        margin:0!important;
-    }
-
-    /* Lewy sidebar */
-    .sidebar,
-    aside.sidebar,
-    .admin-sidebar,
-    .side-menu,
-    nav.sidebar{
-        position:fixed!important;
-        top:0!important;
-        left:0!important;
-        bottom:0!important;
-        width:var(--spidercms-mobile-sidebar-width)!important;
-        max-width:88vw!important;
-        min-width:0!important;
-        height:100vh!important;
-        max-height:100vh!important;
-        z-index:2147482999!important;
-        transform:translateX(-110%)!important;
-        transition:transform .24s ease!important;
-        overflow-y:auto!important;
-        overflow-x:hidden!important;
-        overscroll-behavior:contain!important;
-        padding-top:74px!important;
-        box-shadow:24px 0 80px rgba(0,0,0,.42)!important;
-    }
-
-    body.spidercms-menu-open .sidebar,
-    body.spidercms-menu-open aside.sidebar,
-    body.spidercms-menu-open .admin-sidebar,
-    body.spidercms-menu-open .side-menu,
-    body.spidercms-menu-open nav.sidebar{
-        transform:translateX(0)!important;
-    }
-
-    .sidebar *,
-    aside.sidebar *,
-    .admin-sidebar *,
-    .side-menu *{
-        max-width:100%!important;
-    }
-
-    .nav,
-    .sidebar nav,
-    aside.sidebar nav{
-        display:flex!important;
-        flex-direction:column!important;
-        gap:8px!important;
-    }
-
-    .nav a,
-    .sidebar a,
-    aside.sidebar a{
-        white-space:normal!important;
-        word-break:break-word!important;
-    }
-
-    /* Główna treść */
-    .main,
-    main.main,
-    .admin-main,
-    .content,
-    .admin-content,
-    .panel-content,
-    .page-content,
-    .workspace,
-    section.main{
-        width:100%!important;
-        max-width:100%!important;
-        min-width:0!important;
-        margin:0!important;
-        margin-left:0!important;
-        padding:74px 12px 24px!important;
-        overflow-x:hidden!important;
-        box-sizing:border-box!important;
-    }
-
-    /* Nagłówki/karty */
-    .topbar,
-    .admin-topbar,
-    .page-head,
-    .page-header,
-    .section-head,
-    .toolbar{
-        display:flex!important;
-        flex-direction:column!important;
-        align-items:stretch!important;
-        justify-content:flex-start!important;
-        gap:12px!important;
-        width:100%!important;
-        max-width:100%!important;
-    }
-
-    h1{
-        font-size:clamp(1.35rem, 7vw, 2rem)!important;
-        line-height:1.15!important;
-        overflow-wrap:anywhere!important;
-    }
-
-    h2{
-        font-size:clamp(1.15rem, 5.5vw, 1.55rem)!important;
-        line-height:1.2!important;
-    }
-
-    .grid,
-    .settings-grid,
-    .cards-grid,
-    .dashboard-grid,
-    .stats-grid,
-    .form-grid,
-    .two-col,
-    .three-col,
-    .columns{
-        display:grid!important;
-        grid-template-columns:1fr!important;
-        gap:14px!important;
-        width:100%!important;
-        max-width:100%!important;
-        min-width:0!important;
-    }
-
-    .card,
-    .box,
-    .panel,
-    .panel-card,
-    .settings-card,
-    .module-card,
-    .stat-card,
-    .card.half,
-    .card.third,
-    .card.two,
-    .card.three{
-        grid-column:1 / -1!important;
-        width:100%!important;
-        max-width:100%!important;
-        min-width:0!important;
-        margin-left:0!important;
-        margin-right:0!important;
-        padding:15px!important;
-        border-radius:18px!important;
-        box-sizing:border-box!important;
-        overflow:hidden!important;
-    }
-
-    /* Formularze */
-    form,
-    fieldset,
-    .form-row,
-    .form-group,
-    .input-group,
-    .settings-row{
-        width:100%!important;
-        max-width:100%!important;
-        min-width:0!important;
-        box-sizing:border-box!important;
-    }
-
-    label{
-        max-width:100%!important;
-        overflow-wrap:anywhere!important;
-    }
-
-    input,
-    select,
-    textarea{
-        width:100%!important;
-        max-width:100%!important;
-        min-width:0!important;
-        box-sizing:border-box!important;
-    }
-
-    textarea{
-        min-height:150px!important;
-    }
-
-    .actions,
-    .btn-row,
-    .form-actions,
-    .button-row,
-    .toolbar-actions{
-        display:flex!important;
-        flex-wrap:wrap!important;
-        align-items:stretch!important;
-        gap:8px!important;
-        width:100%!important;
-        max-width:100%!important;
-    }
-
-    .btn,
-    button,
-    input[type="submit"],
-    .button{
-        max-width:100%!important;
-        white-space:normal!important;
-        overflow-wrap:anywhere!important;
-    }
-
-    /* Tabele jako poziomo przewijane */
-    table{
-        display:block!important;
-        width:100%!important;
-        max-width:100%!important;
-        overflow-x:auto!important;
-        -webkit-overflow-scrolling:touch!important;
-        white-space:nowrap!important;
-        border-collapse:separate!important;
-    }
-
-    thead,
-    tbody,
-    tr{
-        width:100%!important;
-    }
-
-    th,
-    td{
-        white-space:nowrap!important;
-    }
-
-    /* Edytor TinyMCE */
-    .tox,
-    .tox-tinymce,
-    .tox-editor-container,
-    .tox-sidebar-wrap,
-    .tox-edit-area{
-        max-width:100%!important;
-        width:100%!important;
-        min-width:0!important;
-        box-sizing:border-box!important;
-    }
-
-    .tox-toolbar,
-    .tox-toolbar__primary,
-    .tox-toolbar__overflow{
-        flex-wrap:wrap!important;
-    }
-
-    /* Media, menu, slider */
-    img,
-    video,
-    iframe{
-        max-width:100%!important;
-        height:auto;
-    }
-
-    .menu-row,
-    .submenu-row,
-    .slider-row,
-    .media-row,
-    .log-row,
-    .preset-row{
-        display:grid!important;
-        grid-template-columns:1fr!important;
-        gap:10px!important;
-        width:100%!important;
-        max-width:100%!important;
-    }
-
-    .media-grid,
-    .gallery-grid,
-    .uploads-grid,
-    .preset-grid{
-        display:grid!important;
-        grid-template-columns:repeat(2, minmax(0, 1fr))!important;
-        gap:10px!important;
-    }
-}
-
-@media (max-width: 560px){
-    .main,
-    main.main,
-    .admin-main,
-    .content,
-    .admin-content,
-    .panel-content,
-    .page-content,
-    .workspace,
-    section.main{
-        padding-left:9px!important;
-        padding-right:9px!important;
-    }
-
-    .card,
-    .box,
-    .panel,
-    .panel-card,
-    .settings-card,
-    .module-card,
-    .stat-card{
-        padding:12px!important;
-        border-radius:15px!important;
-    }
-
-    .actions .btn,
-    .actions button,
-    .form-actions .btn,
-    .form-actions button,
-    .btn-row .btn,
-    .btn-row button{
-        width:100%!important;
-        justify-content:center!important;
-        text-align:center!important;
-    }
-
-    .media-grid,
-    .gallery-grid,
-    .uploads-grid,
-    .preset-grid{
-        grid-template-columns:1fr!important;
-    }
-}
-/* SPIDERCMS MOBILE HARD FIX END */
 
 
 
@@ -7327,6 +6926,217 @@ function render_editor_tools() {
     transform:translateY(-1px);
 }
 /* SPIDERCMS LIVE BUTTON FIX END */
+
+
+
+/* SPIDERCMS CURRENT ADMIN MOBILE FIX START */
+@media (max-width: 1024px) {
+    html,
+    body {
+        width: 100% !important;
+        max-width: 100% !important;
+        min-width: 0 !important;
+        overflow-x: hidden !important;
+    }
+
+    body {
+        display: block !important;
+        min-height: 100vh !important;
+    }
+
+    body.spidercms-sidebar-open {
+        overflow: hidden !important;
+    }
+
+    .spidercms-mobile-topbar {
+        display: flex !important;
+        position: fixed !important;
+        top: 0 !important;
+        left: 0 !important;
+        right: 0 !important;
+        height: 64px !important;
+        z-index: 1400 !important;
+        align-items: center !important;
+        justify-content: space-between !important;
+        gap: .8rem !important;
+        padding: .85rem 1rem !important;
+        background: #0f172a !important;
+        border-bottom: 1px solid #334155 !important;
+        box-shadow: 0 10px 24px rgba(0,0,0,.22) !important;
+        box-sizing: border-box !important;
+    }
+
+    .spidercms-mobile-brand {
+        display: flex !important;
+        align-items: center !important;
+        gap: .65rem !important;
+        font-weight: 900 !important;
+        color: #f8fafc !important;
+        min-width: 0 !important;
+    }
+
+    .spidercms-mobile-brand img {
+        height: 34px !important;
+        width: auto !important;
+        border-radius: 6px !important;
+    }
+
+    .spidercms-mobile-menu-btn {
+        display: inline-flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        gap: .45rem !important;
+        min-width: 46px !important;
+        height: 46px !important;
+        border: 1px solid #334155 !important;
+        background: #111827 !important;
+        color: #f8fafc !important;
+        border-radius: 12px !important;
+        padding: .68rem .9rem !important;
+        font-weight: 800 !important;
+        cursor: pointer !important;
+        box-sizing: border-box !important;
+    }
+
+    #sidebar {
+        position: fixed !important;
+        top: 0 !important;
+        left: 0 !important;
+        bottom: 0 !important;
+        width: min(86vw, 320px) !important;
+        max-width: 86vw !important;
+        min-width: 0 !important;
+        height: 100vh !important;
+        max-height: 100vh !important;
+        transform: translateX(-105%) !important;
+        transition: transform .22s ease !important;
+        z-index: 1500 !important;
+        overflow-y: auto !important;
+        overflow-x: hidden !important;
+        -webkit-overflow-scrolling: touch !important;
+        padding-top: 76px !important;
+        box-sizing: border-box !important;
+        box-shadow: 18px 0 50px rgba(0,0,0,.45) !important;
+    }
+
+    body.spidercms-sidebar-open #sidebar {
+        transform: translateX(0) !important;
+    }
+
+    .spidercms-sidebar-backdrop {
+        display: none !important;
+        position: fixed !important;
+        inset: 0 !important;
+        z-index: 1450 !important;
+        background: rgba(2,6,23,.68) !important;
+        backdrop-filter: blur(2px) !important;
+    }
+
+    body.spidercms-sidebar-open .spidercms-sidebar-backdrop {
+        display: block !important;
+    }
+
+    #main {
+        display: block !important;
+        flex: none !important;
+        width: 100% !important;
+        max-width: 100% !important;
+        min-width: 0 !important;
+        margin: 0 !important;
+        margin-left: 0 !important;
+        padding: 82px 12px 24px !important;
+        box-sizing: border-box !important;
+        overflow-x: hidden !important;
+    }
+
+    #main > header {
+        display: flex !important;
+        flex-direction: column !important;
+        align-items: stretch !important;
+        gap: .85rem !important;
+        padding: 1rem !important;
+        width: 100% !important;
+        max-width: 100% !important;
+        box-sizing: border-box !important;
+    }
+
+    #main > header h1,
+    #main h1,
+    #main h2,
+    #main h3,
+    #main p,
+    #main label,
+    #main span,
+    #main div {
+        word-break: normal !important;
+        overflow-wrap: break-word !important;
+    }
+
+    #main > header h1 {
+        font-size: 1.35rem !important;
+        line-height: 1.2 !important;
+    }
+
+    #main .card,
+    #main .box,
+    #main .panel,
+    #main .panel-card,
+    #main .settings-card,
+    #main section {
+        width: 100% !important;
+        max-width: 100% !important;
+        min-width: 0 !important;
+        box-sizing: border-box !important;
+        overflow: hidden !important;
+    }
+
+    #main table {
+        display: block !important;
+        width: 100% !important;
+        max-width: 100% !important;
+        overflow-x: auto !important;
+        -webkit-overflow-scrolling: touch !important;
+        white-space: nowrap !important;
+    }
+
+    #main input,
+    #main select,
+    #main textarea,
+    #main button,
+    #main .btn {
+        max-width: 100% !important;
+        box-sizing: border-box !important;
+    }
+
+    #main .tox,
+    #main .tox-tinymce,
+    #main .tox-editor-container,
+    #main .tox-sidebar-wrap,
+    #main .tox-edit-area {
+        width: 100% !important;
+        max-width: 100% !important;
+        min-width: 0 !important;
+        box-sizing: border-box !important;
+    }
+}
+
+@media (max-width: 560px) {
+    #main {
+        padding-left: 9px !important;
+        padding-right: 9px !important;
+    }
+
+    #main .card {
+        padding: 12px !important;
+        border-radius: 15px !important;
+    }
+
+    #main th,
+    #main td {
+        padding: .7rem .75rem !important;
+    }
+}
+/* SPIDERCMS CURRENT ADMIN MOBILE FIX END */
 
 </style>
 
@@ -8740,6 +8550,14 @@ section[data-spidercms-purpose="create-page"]{
 }
 /* SPIDERCMS HIDE NEW PAGE WHILE EDITING CSS END */
 
+
+
+
+
+
+
+
+
 </style>
 <?php endif; ?>
 
@@ -9497,6 +9315,77 @@ document.addEventListener('DOMContentLoaded', function(){
     });
 })();
 /* SPIDERCMS LIVE REMOVE WRONG BOOKING LINKS END */
+</script>
+
+
+
+<script>
+
+</script>
+
+
+
+<script>
+
+</script>
+
+
+
+<script>
+(function(){
+    document.addEventListener('DOMContentLoaded', function(){
+        if (document.querySelector('.live-shell')) return;
+
+        const btn = document.getElementById('spidercmsMobileMenuBtn');
+        const backdrop = document.getElementById('spidercmsSidebarBackdrop');
+        const body = document.body;
+
+        function closeMenu(){
+            body.classList.remove('spidercms-sidebar-open');
+            if (btn) btn.setAttribute('aria-expanded','false');
+        }
+
+        function toggleMenu(e){
+            if (e) {
+                e.preventDefault();
+                e.stopPropagation();
+            }
+
+            const open = body.classList.toggle('spidercms-sidebar-open');
+
+            if (btn) {
+                btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+            }
+        }
+
+        if (btn) {
+            btn.addEventListener('click', toggleMenu);
+            btn.addEventListener('touchstart', toggleMenu, {passive:false});
+        }
+
+        if (backdrop) {
+            backdrop.addEventListener('click', closeMenu);
+            backdrop.addEventListener('touchstart', function(e){
+                e.preventDefault();
+                closeMenu();
+            }, {passive:false});
+        }
+
+        document.addEventListener('keydown', function(e){
+            if (e.key === 'Escape') closeMenu();
+        });
+
+        document.querySelectorAll('#sidebar a').forEach(function(a){
+            a.addEventListener('click', function(){
+                if (window.innerWidth <= 1024) closeMenu();
+            });
+        });
+
+        window.addEventListener('resize', function(){
+            if (window.innerWidth > 1024) closeMenu();
+        });
+    });
+})();
 </script>
 
 </body>
