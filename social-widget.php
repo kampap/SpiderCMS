@@ -3,7 +3,7 @@ $social_payload = array (
   'settings' => 
   array (
     'enabled' => '1',
-    'show_header' => '0',
+    'show_header' => '1',
     'show_footer' => '1',
     'show_floating' => '1',
     'show_contact_widget' => '0',

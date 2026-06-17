@@ -5,8 +5,8 @@ if (!is_array($chat_settings)) $chat_settings = [];
 $chat_enabled = ($chat_settings['enabled'] ?? '1') === '1';
 if (!$chat_enabled) return;
 $chat_title = $chat_settings['title'] ?? 'Masz pytanie?';
-$chat_subtitle = $chat_settings['subtitle'] ?? 'Napisz do nas. Odpowiemy możliwie szybko.';
-$chat_welcome = $chat_settings['welcome'] ?? 'Cześć! W czym możemy pomóc?';
+$chat_subtitle = $chat_settings['subtitle'] ?? 'Napisz do mnie. Odpowiem możliwie szybko.';
+$chat_welcome = $chat_settings['welcome'] ?? 'Cześć! W czym mogę pomóc?';
 $chat_button = $chat_settings['button_text'] ?? 'Chat';
 ?>
 <div id="spidercms-chat">
