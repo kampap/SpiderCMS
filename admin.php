@@ -106,7 +106,7 @@ function spidercms_log_label($action) {
         'save_chat_settings'=>'Zapis ustawień czatu','test_chat_email'=>'Test e-mail / SMTP',
         'chat_reply'=>'Odpowiedź na czacie','chat_mark_read'=>'Oznaczenie rozmowy jako przeczytanej',
         'chat_archive'=>'Archiwizacja rozmowy','chat_delete'=>'Usunięcie rozmowy','clear_action_logs'=>'Czyszczenie logów',
-        'export_action_logs'=>'Eksport logów akcji'
+        'export_action_logs'=>'Eksport logów akcji','add_admin_user'=>'Dodanie użytkownika','update_admin_user'=>'Edycja użytkownika','delete_admin_user'=>'Usunięcie użytkownika','permission_denied_settings_tab'=>'Odmowa dostępu do ustawień','permission_denied_settings_action'=>'Odmowa zmiany ustawień','password_reset_request'=>'Prośba o reset hasła','password_reset_success'=>'Reset hasła'
     ];
     return $labels[$action] ?? $action;
 }
@@ -268,6 +268,441 @@ function spidercms_log_status_badge($status) {
 }
 
 spidercms_logs_bootstrap();
+
+
+// ----------------------------------------------------------------------
+// SPIDERCMS ADMIN USERS - konta użytkowników panelu
+// ----------------------------------------------------------------------
+if (!defined('SPIDERCMS_ADMIN_USERS_DIR')) {
+    define('SPIDERCMS_ADMIN_USERS_DIR', __DIR__ . '/.users');
+}
+if (!defined('SPIDERCMS_ADMIN_USERS_FILE')) {
+    define('SPIDERCMS_ADMIN_USERS_FILE', SPIDERCMS_ADMIN_USERS_DIR . '/admin_users.json');
+}
+
+function spidercms_admin_users_bootstrap() {
+    if (!is_dir(SPIDERCMS_ADMIN_USERS_DIR)) {
+        @mkdir(SPIDERCMS_ADMIN_USERS_DIR, 0750, true);
+    }
+    spidercms_write_htaccess(SPIDERCMS_ADMIN_USERS_DIR, "Options -Indexes\nRequire all denied\nDeny from all\n");
+
+    if (!file_exists(SPIDERCMS_ADMIN_USERS_FILE)) {
+        @file_put_contents(SPIDERCMS_ADMIN_USERS_FILE, json_encode([], JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES), LOCK_EX);
+        @chmod(SPIDERCMS_ADMIN_USERS_FILE, 0640);
+    }
+}
+
+function spidercms_admin_users_load() {
+    spidercms_admin_users_bootstrap();
+    $data = json_decode((string)@file_get_contents(SPIDERCMS_ADMIN_USERS_FILE), true);
+    return is_array($data) ? $data : [];
+}
+
+function spidercms_admin_users_save(array $users) {
+    spidercms_admin_users_bootstrap();
+    $json = json_encode(array_values($users), JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    if ($json === false) return false;
+    $ok = @file_put_contents(SPIDERCMS_ADMIN_USERS_FILE, $json, LOCK_EX) !== false;
+    @chmod(SPIDERCMS_ADMIN_USERS_FILE, 0640);
+    return $ok;
+}
+
+function spidercms_admin_user_clean_username($username) {
+    $username = strtolower(trim((string)$username));
+    $username = preg_replace('/[^a-z0-9_\-.@]/', '', $username);
+    return substr($username, 0, 80);
+}
+
+function spidercms_admin_user_clean_role($role) {
+    $role = strtolower(trim((string)$role));
+    return in_array($role, ['admin','editor','moderator','viewer'], true) ? $role : 'editor';
+}
+
+function spidercms_admin_user_role_label($role) {
+    $labels = [
+        'admin' => 'Administrator',
+        'editor' => 'Edytor',
+        'moderator' => 'Moderator',
+        'viewer' => 'Podgląd',
+    ];
+    return $labels[$role] ?? $role;
+}
+
+function spidercms_admin_current_username() {
+    return $_SESSION['admin_username'] ?? 'admin';
+}
+
+function spidercms_admin_current_role() {
+    return $_SESSION['admin_user_role'] ?? 'admin';
+}
+
+function spidercms_admin_has_role($roles) {
+    $role = spidercms_admin_current_role();
+    if ($role === 'admin') return true;
+    return in_array($role, (array)$roles, true);
+}
+
+function spidercms_admin_require_role($roles) {
+    if (!spidercms_admin_has_role($roles)) {
+        http_response_code(403);
+        exit('Brak uprawnień do wykonania tej akcji.');
+    }
+}
+
+
+function spidercms_admin_is_admin() {
+    return spidercms_admin_current_role() === 'admin';
+}
+
+function spidercms_admin_can_access_settings() {
+    return spidercms_admin_is_admin();
+}
+
+function spidercms_admin_settings_actions() {
+    return [
+        'save_settings',
+        'change_password',
+        'apply_site_preset',
+        'save_social_settings',
+    ];
+}
+
+
+function spidercms_admin_users_ensure_default($admin_hash = '') {
+    $users = spidercms_admin_users_load();
+    if (!empty($users)) return;
+
+    $hash = (is_string($admin_hash) && $admin_hash !== '') ? $admin_hash : password_hash('admin', PASSWORD_DEFAULT);
+
+    $users[] = [
+        'id' => 'adm_' . date('YmdHis') . '_' . bin2hex(random_bytes(4)),
+        'username' => 'admin',
+        'display_name' => 'Administrator',
+        'email' => '',
+        'role' => 'admin',
+        'password_hash' => $hash,
+        'active' => true,
+        'created_at' => date('Y-m-d H:i:s'),
+        'last_login_at' => '',
+        'last_login_ip_hash' => '',
+    ];
+    spidercms_admin_users_save($users);
+}
+
+function spidercms_admin_authenticate_user($username, $password, $legacy_admin_hash = '') {
+    $username = spidercms_admin_user_clean_username($username);
+    if ($username === '') $username = 'admin';
+
+    spidercms_admin_users_ensure_default($legacy_admin_hash);
+    $users = spidercms_admin_users_load();
+
+    foreach ($users as $idx => $user) {
+        if (($user['username'] ?? '') !== $username) continue;
+        if (empty($user['active'])) return false;
+
+        if (password_verify((string)$password, (string)($user['password_hash'] ?? ''))) {
+            $users[$idx]['last_login_at'] = date('Y-m-d H:i:s');
+            $users[$idx]['last_login_ip_hash'] = hash('sha256', spidercms_client_ip());
+            spidercms_admin_users_save($users);
+            return $users[$idx];
+        }
+        return false;
+    }
+
+    // Kompatybilność z poprzednim systemem: login admin + stare hasło z config.php.
+    if ($username === 'admin' && is_string($legacy_admin_hash) && $legacy_admin_hash !== '' && password_verify((string)$password, $legacy_admin_hash)) {
+        spidercms_admin_users_ensure_default($legacy_admin_hash);
+        $users = spidercms_admin_users_load();
+        foreach ($users as $user) {
+            if (($user['username'] ?? '') === 'admin') return $user;
+        }
+    }
+
+    return false;
+}
+
+
+// ----------------------------------------------------------------------
+// SPIDERCMS PASSWORD RESET
+// ----------------------------------------------------------------------
+if (!defined('SPIDERCMS_PASSWORD_RESETS_FILE')) {
+    define('SPIDERCMS_PASSWORD_RESETS_FILE', SPIDERCMS_ADMIN_USERS_DIR . '/password_resets.json');
+}
+
+function spidercms_password_resets_load() {
+    spidercms_admin_users_bootstrap();
+    $data = json_decode((string)@file_get_contents(SPIDERCMS_PASSWORD_RESETS_FILE), true);
+    return is_array($data) ? $data : [];
+}
+
+function spidercms_password_resets_save(array $tokens) {
+    spidercms_admin_users_bootstrap();
+    $json = json_encode($tokens, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    if ($json === false) return false;
+    $ok = @file_put_contents(SPIDERCMS_PASSWORD_RESETS_FILE, $json, LOCK_EX) !== false;
+    @chmod(SPIDERCMS_PASSWORD_RESETS_FILE, 0640);
+    return $ok;
+}
+
+function spidercms_password_reset_cleanup() {
+    $tokens = spidercms_password_resets_load();
+    $now = time();
+    $changed = false;
+    foreach ($tokens as $token => $row) {
+        if (!is_array($row) || (int)($row['expires_at'] ?? 0) < $now || !empty($row['used'])) {
+            unset($tokens[$token]);
+            $changed = true;
+        }
+    }
+    if ($changed) spidercms_password_resets_save($tokens);
+}
+
+function spidercms_password_reset_base_admin_url() {
+    $scheme = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http';
+    $host = $_SERVER['HTTP_HOST'] ?? '';
+    $script = $_SERVER['SCRIPT_NAME'] ?? '/admin.php';
+    if ($host === '') return 'admin.php';
+    return $scheme . '://' . $host . $script;
+}
+
+function spidercms_password_reset_find_user($username_or_email) {
+    $needle = strtolower(trim((string)$username_or_email));
+    if ($needle === '') return null;
+    foreach (spidercms_admin_users_load() as $idx => $user) {
+        $u = strtolower((string)($user['username'] ?? ''));
+        $e = strtolower((string)($user['email'] ?? ''));
+        if ($needle === $u || ($e !== '' && $needle === $e)) {
+            $user['_index'] = $idx;
+            return $user;
+        }
+    }
+    return null;
+}
+
+function spidercms_password_reset_create_token($username_or_email) {
+    spidercms_password_reset_cleanup();
+    $user = spidercms_password_reset_find_user($username_or_email);
+    if (!$user || empty($user['active'])) return false;
+
+    $token = bin2hex(random_bytes(32));
+    $tokens = spidercms_password_resets_load();
+    $tokens[$token] = [
+        'username' => (string)($user['username'] ?? ''),
+        'created_at' => time(),
+        'expires_at' => time() + 3600,
+        'ip_hash' => hash('sha256', spidercms_client_ip()),
+        'used' => false,
+    ];
+    spidercms_password_resets_save($tokens);
+
+    return [
+        'token' => $token,
+        'user' => $user,
+        'url' => spidercms_password_reset_base_admin_url() . '?reset_token=' . rawurlencode($token),
+    ];
+}
+
+function spidercms_password_reset_send_email($email, $url, $username = '') {
+    $email = trim((string)$email);
+    if ($email === '' || !filter_var($email, FILTER_VALIDATE_EMAIL)) return false;
+
+    $subject = 'Reset hasła SpiderCMS';
+    $body = "Witaj" . ($username !== '' ? " " . $username : "") . ",\n\n";
+    $body .= "Otrzymaliśmy prośbę o reset hasła do panelu SpiderCMS.\n\n";
+    $body .= "Kliknij link poniżej, aby ustawić nowe hasło. Link jest ważny przez 1 godzinę:\n";
+    $body .= $url . "\n\n";
+    $body .= "Jeżeli to nie Ty wysłałeś tę prośbę, zignoruj tę wiadomość.\n";
+
+    $headers = "Content-Type: text/plain; charset=UTF-8\r\n";
+    return @mail($email, $subject, $body, $headers);
+}
+
+function spidercms_password_reset_get_valid($token) {
+    spidercms_password_reset_cleanup();
+    $token = trim((string)$token);
+    if ($token === '') return false;
+    $tokens = spidercms_password_resets_load();
+    if (empty($tokens[$token]) || !is_array($tokens[$token])) return false;
+    $row = $tokens[$token];
+    if (!empty($row['used'])) return false;
+    if ((int)($row['expires_at'] ?? 0) < time()) return false;
+    return $row;
+}
+
+function spidercms_password_reset_apply($token, $new_password) {
+    $row = spidercms_password_reset_get_valid($token);
+    if (!$row) return false;
+
+    $new_password = (string)$new_password;
+    if (strlen($new_password) < 6) return false;
+
+    $users = spidercms_admin_users_load();
+    $changed = false;
+    foreach ($users as &$user) {
+        if (($user['username'] ?? '') === ($row['username'] ?? '')) {
+            $user['password_hash'] = password_hash($new_password, PASSWORD_DEFAULT);
+            $user['active'] = true;
+            $changed = true;
+            break;
+        }
+    }
+    unset($user);
+
+    if (!$changed) return false;
+    spidercms_admin_users_save($users);
+
+    $tokens = spidercms_password_resets_load();
+    if (isset($tokens[$token])) {
+        $tokens[$token]['used'] = true;
+        $tokens[$token]['used_at'] = time();
+    }
+    spidercms_password_resets_save($tokens);
+
+    spidercms_log_action('password_reset_success', 'success', ['username' => $row['username'] ?? '']);
+    return true;
+}
+
+function spidercms_admin_users_tab_html() {
+    $users = spidercms_admin_users_load();
+    $current = spidercms_admin_current_username();
+
+    ob_start();
+    ?>
+    <div class="card">
+        <h2 style="margin-bottom:1rem;"><i class="fa-solid fa-users-gear"></i> Użytkownicy panelu</h2>
+        <p style="color:#94a3b8;margin-bottom:1.5rem;">
+            Twórz konta użytkowników panelu SpiderCMS, przypisuj role, resetuj hasła oraz blokuj dostęp. Jeśli użytkownik ma wpisany e-mail, może użyć opcji „Nie pamiętasz hasła?”.
+            Dane są zapisywane bez bazy danych w pliku <code>.users/admin_users.json</code>.
+        </p>
+
+        <div class="spider-users-layout">
+            <div class="card spider-user-card">
+                <h3><i class="fa-solid fa-user-plus"></i> Dodaj użytkownika</h3>
+                <form method="post" class="spider-user-form">
+                    <?= csrf_field() ?>
+                    <input type="hidden" name="action" value="add_admin_user">
+
+                    <label>Login</label>
+                    <input type="text" name="username" required placeholder="editor" autocomplete="off">
+
+                    <label>Nazwa wyświetlana</label>
+                    <input type="text" name="display_name" placeholder="Jan Kowalski">
+
+                    <label>E-mail</label>
+                    <input type="email" name="email" placeholder="name@example.com">
+
+                    <label>Hasło</label>
+                    <input type="password" name="password" required minlength="6" autocomplete="new-password">
+
+                    <label>Rola</label>
+                    <select name="role">
+                        <option value="admin">Administrator - pełny dostęp</option>
+                        <option value="editor">Edytor - strony i media</option>
+                        <option value="moderator">Moderator - chat, rezerwacje i logi</option>
+                        <option value="viewer">Podgląd - tylko odczyt</option>
+                    </select>
+
+                    <button type="submit" class="btn btn-edit"><i class="fa-solid fa-plus"></i> Utwórz użytkownika</button>
+                </form>
+            </div>
+
+            <div class="card spider-user-card spider-users-table-wrap">
+                <h3><i class="fa-solid fa-users"></i> Lista użytkowników</h3>
+                <table class="logs-table">
+                    <thead>
+                        <tr>
+                            <th>Login</th>
+                            <th>Nazwa</th>
+                            <th>Rola</th>
+                            <th>Status</th>
+                            <th>Ostatnie logowanie</th>
+                            <th>Akcje</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                    <?php foreach ($users as $user): ?>
+                        <?php
+                        $username = (string)($user['username'] ?? '');
+                        $is_self = $username === $current;
+                        ?>
+                        <tr>
+                            <td><strong><?= e($username) ?></strong><br><small><?= e($user['email'] ?? '') ?></small></td>
+                            <td><?= e($user['display_name'] ?? '') ?></td>
+                            <td><?= e(spidercms_admin_user_role_label($user['role'] ?? 'editor')) ?></td>
+                            <td><?= !empty($user['active']) ? '<span class="log-badge success">Aktywne</span>' : '<span class="log-badge error">Zablokowane</span>' ?></td>
+                            <td><?= e($user['last_login_at'] ?? '-') ?></td>
+                            <td style="min-width:260px;">
+                                <details>
+                                    <summary class="btn btn-view spider-summary-btn">Edytuj</summary>
+                                    <form method="post" class="spider-user-form small">
+                                        <?= csrf_field() ?>
+                                        <input type="hidden" name="action" value="update_admin_user">
+                                        <input type="hidden" name="user_id" value="<?= e($user['id'] ?? '') ?>">
+
+                                        <input type="text" name="display_name" value="<?= e($user['display_name'] ?? '') ?>" placeholder="Nazwa wyświetlana">
+                                        <input type="email" name="email" value="<?= e($user['email'] ?? '') ?>" placeholder="E-mail">
+
+                                        <select name="role" <?= $is_self ? 'disabled' : '' ?>>
+                                            <?php foreach (['admin'=>'Administrator','editor'=>'Edytor','moderator'=>'Moderator','viewer'=>'Podgląd'] as $role => $label): ?>
+                                                <option value="<?= e($role) ?>" <?= (($user['role'] ?? '') === $role) ? 'selected' : '' ?>><?= e($label) ?></option>
+                                            <?php endforeach; ?>
+                                        </select>
+                                        <?php if ($is_self): ?>
+                                            <input type="hidden" name="role" value="<?= e($user['role'] ?? 'admin') ?>">
+                                        <?php endif; ?>
+
+                                        <input type="password" name="new_password" placeholder="Nowe hasło, zostaw puste bez zmian">
+
+                                        <label class="inline-check">
+                                            <input type="checkbox" name="active" value="1" <?= !empty($user['active']) ? 'checked' : '' ?> <?= $is_self ? 'disabled' : '' ?>>
+                                            Konto aktywne
+                                        </label>
+                                        <?php if ($is_self): ?>
+                                            <input type="hidden" name="active" value="1">
+                                        <?php endif; ?>
+
+                                        <button type="submit" class="btn btn-edit">Zapisz użytkownika</button>
+                                    </form>
+                                </details>
+
+                                <?php if (!$is_self): ?>
+                                    <form method="post" style="display:inline;" onsubmit="return confirm('Usunąć tego użytkownika?');">
+                                        <?= csrf_field() ?>
+                                        <input type="hidden" name="action" value="delete_admin_user">
+                                        <input type="hidden" name="user_id" value="<?= e($user['id'] ?? '') ?>">
+                                        <button type="submit" class="btn btn-delete">Usuń</button>
+                                    </form>
+                                <?php endif; ?>
+                            </td>
+                        </tr>
+                    <?php endforeach; ?>
+                    <?php if (empty($users)): ?>
+                        <tr><td colspan="6">Brak użytkowników.</td></tr>
+                    <?php endif; ?>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <style>
+    .spider-users-layout{display:grid;grid-template-columns:minmax(280px,420px) 1fr;gap:1.5rem;align-items:start}
+    .spider-user-card{margin:0;background:rgba(15,23,42,.45)}
+    .spider-users-table-wrap{overflow:auto}
+    .spider-user-form{display:grid;gap:.75rem;margin-top:1rem}
+    .spider-user-form.small{margin-top:.75rem;gap:.5rem}
+    .spider-user-form input,.spider-user-form select{
+        width:100%;padding:.8rem .9rem;border-radius:10px;border:1px solid #334155;background:#0f172a;color:#f8fafc;box-sizing:border-box
+    }
+    .spider-user-form label{color:#cbd5e1;font-weight:700}
+    .inline-check{display:flex!important;gap:.5rem;align-items:center}
+    .inline-check input{width:auto!important}
+    .spider-summary-btn{display:inline-flex!important;cursor:pointer;margin-bottom:.4rem}
+    @media(max-width:980px){.spider-users-layout{grid-template-columns:1fr}}
+    </style>
+    <?php
+    return ob_get_clean();
+}
 
 // ----------------------------------------------------------------------
 // SPIDERCMS SECURITY HARDENING START
@@ -487,6 +922,7 @@ if (isset($_GET['logout']) && $_GET['logout'] === '1') {
 }
 
 require_once __DIR__ . '/config.php';
+spidercms_admin_users_ensure_default($ADMIN_HASH ?? '');
 
 // ----------------------------------------------------------------------
 // BAZOWA ŚCIEŻKA
@@ -579,6 +1015,26 @@ if (!array_key_exists('header_title_gap', $settings)) $settings['header_title_ga
 if (!array_key_exists('header_title_uppercase', $settings)) $settings['header_title_uppercase'] = '0';
 if (!array_key_exists('header_title_italic', $settings)) $settings['header_title_italic'] = '0';
 if (!array_key_exists('header_title_shadow', $settings)) $settings['header_title_shadow'] = '0';
+
+if (!array_key_exists('site_menu_behavior', $settings)) $settings['site_menu_behavior'] = 'standard';
+if (!array_key_exists('site_menu_transparent_top', $settings)) $settings['site_menu_transparent_top'] = '0';
+if (!array_key_exists('site_menu_blur', $settings)) $settings['site_menu_blur'] = '0';
+if (!array_key_exists('site_menu_shadow_scroll', $settings)) $settings['site_menu_shadow_scroll'] = '1';
+if (!array_key_exists('site_menu_auto_hide', $settings)) $settings['site_menu_auto_hide'] = '0';
+if (!array_key_exists('site_menu_animate', $settings)) $settings['site_menu_animate'] = '1';
+if (!array_key_exists('site_menu_mobile_style', $settings)) $settings['site_menu_mobile_style'] = 'dropdown';
+if (!array_key_exists('site_menu_mobile_side', $settings)) $settings['site_menu_mobile_side'] = 'right';
+if (!array_key_exists('site_menu_mobile_autoclose', $settings)) $settings['site_menu_mobile_autoclose'] = '1';
+if (!array_key_exists('site_menu_height', $settings)) $settings['site_menu_height'] = '74';
+if (!array_key_exists('site_menu_radius', $settings)) $settings['site_menu_radius'] = '0';
+if (!array_key_exists('site_menu_active_style', $settings)) $settings['site_menu_active_style'] = 'underline';
+if (!array_key_exists('site_menu_hover_style', $settings)) $settings['site_menu_hover_style'] = 'lift';
+if (!array_key_exists('site_menu_logo_shrink', $settings)) $settings['site_menu_logo_shrink'] = '1';
+if (!array_key_exists('site_menu_progress', $settings)) $settings['site_menu_progress'] = '0';
+if (!array_key_exists('site_menu_cta_enabled', $settings)) $settings['site_menu_cta_enabled'] = '0';
+if (!array_key_exists('site_menu_cta_text', $settings)) $settings['site_menu_cta_text'] = 'Umów wizytę';
+if (!array_key_exists('site_menu_cta_url', $settings)) $settings['site_menu_cta_url'] = '#kontakt';
+
 if (!array_key_exists('header_title_bg', $settings)) $settings['header_title_bg'] = '';
 if (!array_key_exists('header_title_radius', $settings)) $settings['header_title_radius'] = '0';
 
@@ -660,6 +1116,191 @@ function spidercms_page_set_title_in_source($source, $title) {
     return $source;
 }
 
+
+// ----------------------------------------------------------------------
+// ZACHOWANIE MENU STRONY WWW - FRONTEND
+// ----------------------------------------------------------------------
+function spidercms_write_site_menu_behavior_file() {
+    global $settings;
+
+    $cfg = [
+        'behavior' => $settings['site_menu_behavior'] ?? 'standard',
+        'transparentTop' => ($settings['site_menu_transparent_top'] ?? '0') === '1',
+        'blur' => ($settings['site_menu_blur'] ?? '0') === '1',
+        'shadowScroll' => ($settings['site_menu_shadow_scroll'] ?? '1') === '1',
+        'autoHide' => (($settings['site_menu_auto_hide'] ?? '0') === '1') || (($settings['site_menu_behavior'] ?? 'standard') === 'autohide'),
+        'animate' => ($settings['site_menu_animate'] ?? '1') === '1',
+        'mobileStyle' => $settings['site_menu_mobile_style'] ?? 'dropdown',
+        'mobileSide' => $settings['site_menu_mobile_side'] ?? 'right',
+        'mobileAutoclose' => ($settings['site_menu_mobile_autoclose'] ?? '1') === '1',
+        'height' => max(52, min(120, (int)($settings['site_menu_height'] ?? 74))),
+        'radius' => max(0, min(40, (int)($settings['site_menu_radius'] ?? 0))),
+        'activeStyle' => $settings['site_menu_active_style'] ?? 'underline',
+        'hoverStyle' => $settings['site_menu_hover_style'] ?? 'lift',
+        'logoShrink' => ($settings['site_menu_logo_shrink'] ?? '1') === '1',
+        'progress' => ($settings['site_menu_progress'] ?? '0') === '1',
+        'ctaEnabled' => ($settings['site_menu_cta_enabled'] ?? '0') === '1',
+        'ctaText' => $settings['site_menu_cta_text'] ?? 'Umów wizytę',
+        'ctaUrl' => $settings['site_menu_cta_url'] ?? '#kontakt',
+    ];
+
+    $payload = var_export($cfg, true);
+
+    $file = <<<'PHP'
+<?php
+$spider_menu_cfg = __PAYLOAD__;
+?>
+<style>
+:root{
+    --spider-site-menu-height: <?php echo (int)$spider_menu_cfg['height']; ?>px;
+    --spider-site-menu-radius: <?php echo (int)$spider_menu_cfg['radius']; ?>px;
+}
+.site-header{
+    min-height:var(--spider-site-menu-height)!important;
+    border-radius:0 0 var(--spider-site-menu-radius) var(--spider-site-menu-radius)!important;
+    transition:transform .25s ease, background .25s ease, box-shadow .25s ease, backdrop-filter .25s ease!important;
+}
+<?php if (in_array($spider_menu_cfg['behavior'], ['sticky','autohide'], true)): ?>
+.site-header{position:sticky!important;top:0!important;z-index:9990!important}
+<?php elseif ($spider_menu_cfg['behavior'] === 'fixed'): ?>
+.site-header{position:fixed!important;top:0!important;left:0!important;right:0!important;z-index:9990!important}
+body{padding-top:var(--spider-site-menu-height)}
+<?php endif; ?>
+<?php if ($spider_menu_cfg['transparentTop']): ?>
+.site-header:not(.spider-menu-scrolled){background:transparent!important;box-shadow:none!important}
+<?php endif; ?>
+<?php if ($spider_menu_cfg['blur']): ?>
+.site-header{backdrop-filter:blur(14px)!important;-webkit-backdrop-filter:blur(14px)!important;background:rgba(255,255,255,.78)!important}
+<?php endif; ?>
+<?php if ($spider_menu_cfg['shadowScroll']): ?>
+.site-header.spider-menu-scrolled{box-shadow:0 12px 34px rgba(15,23,42,.14)!important}
+<?php endif; ?>
+<?php if ($spider_menu_cfg['autoHide']): ?>
+.site-header.spider-menu-hidden{transform:translateY(-110%)!important}
+<?php endif; ?>
+<?php if ($spider_menu_cfg['animate']): ?>
+.site-header{animation:spiderMenuIn .38s ease both}
+@keyframes spiderMenuIn{from{opacity:0;transform:translateY(-10px)}to{opacity:1;transform:translateY(0)}}
+<?php endif; ?>
+<?php if ($spider_menu_cfg['logoShrink']): ?>
+.site-header.spider-menu-scrolled .site-logo,
+.site-header.spider-menu-scrolled .logo img,
+.site-header.spider-menu-scrolled img.logo{max-height:42px!important;transition:max-height .25s ease}
+<?php endif; ?>
+.nav-menu a,.site-header nav a{transition:transform .18s ease, background .18s ease, color .18s ease, box-shadow .18s ease}
+<?php if ($spider_menu_cfg['hoverStyle'] === 'lift'): ?>
+.nav-menu a:hover,.site-header nav a:hover{transform:translateY(-2px)}
+<?php elseif ($spider_menu_cfg['hoverStyle'] === 'underline'): ?>
+.nav-menu a:hover,.site-header nav a:hover{text-decoration:underline;text-underline-offset:6px}
+<?php elseif ($spider_menu_cfg['hoverStyle'] === 'background'): ?>
+.nav-menu a:hover,.site-header nav a:hover{background:rgba(168,85,247,.12);border-radius:999px}
+<?php endif; ?>
+<?php if ($spider_menu_cfg['activeStyle'] === 'underline'): ?>
+.nav-menu a.active,.site-header nav a.active{border-bottom:2px solid var(--primary,#a855f7)}
+<?php elseif ($spider_menu_cfg['activeStyle'] === 'pill'): ?>
+.nav-menu a.active,.site-header nav a.active{background:var(--primary,#a855f7);color:#fff!important;border-radius:999px}
+<?php elseif ($spider_menu_cfg['activeStyle'] === 'box'): ?>
+.nav-menu a.active,.site-header nav a.active{background:rgba(168,85,247,.12);box-shadow:inset 0 0 0 1px rgba(168,85,247,.28);border-radius:12px}
+<?php endif; ?>
+#spider-scroll-progress{position:fixed;top:0;left:0;height:3px;background:var(--primary,#a855f7);width:0;z-index:10000;display:<?php echo $spider_menu_cfg['progress'] ? 'block' : 'none'; ?>}
+.spider-menu-cta{display:inline-flex;align-items:center;justify-content:center;padding:.65rem 1rem;border-radius:999px;background:var(--primary,#a855f7);color:#fff!important;text-decoration:none!important;font-weight:800;margin-left:.6rem}
+@media(max-width:760px){
+    <?php if ($spider_menu_cfg['mobileStyle'] === 'fullscreen'): ?>
+    .nav-menu,.site-header nav{position:fixed!important;inset:0!important;z-index:9998!important;background:#fff!important;display:none!important;flex-direction:column!important;align-items:center!important;justify-content:center!important;gap:1rem!important;padding:2rem!important}
+    body.spider-site-menu-open .nav-menu,body.spider-site-menu-open .site-header nav{display:flex!important}
+    <?php elseif ($spider_menu_cfg['mobileStyle'] === 'side'): ?>
+    .nav-menu,.site-header nav{position:fixed!important;top:0!important;bottom:0!important;<?php echo ($spider_menu_cfg['mobileSide'] === 'left') ? 'left:0;transform:translateX(-105%)' : 'right:0;transform:translateX(105%)'; ?>!important;width:min(340px,86vw)!important;z-index:9998!important;background:#fff!important;display:flex!important;flex-direction:column!important;gap:.5rem!important;padding:5rem 1rem 1rem!important;transition:transform .25s ease!important;box-shadow:0 20px 60px rgba(0,0,0,.25)!important}
+    body.spider-site-menu-open .nav-menu,body.spider-site-menu-open .site-header nav{transform:translateX(0)!important}
+    <?php else: ?>
+    .nav-menu,.site-header nav{display:none!important;position:absolute!important;top:100%!important;left:0!important;right:0!important;background:#fff!important;flex-direction:column!important;padding:1rem!important;box-shadow:0 16px 40px rgba(0,0,0,.14)!important}
+    body.spider-site-menu-open .nav-menu,body.spider-site-menu-open .site-header nav{display:flex!important}
+    <?php endif; ?>
+}
+</style>
+<div id="spider-scroll-progress"></div>
+<script>
+(function(){
+    const cfg = <?php echo json_encode($spider_menu_cfg, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES); ?>;
+    function ready(fn){ if(document.readyState !== 'loading') fn(); else document.addEventListener('DOMContentLoaded', fn); }
+    ready(function(){
+        const header = document.querySelector('.site-header');
+        if(!header) return;
+
+        let lastY = window.scrollY || 0;
+        const progress = document.getElementById('spider-scroll-progress');
+
+        function onScroll(){
+            const y = window.scrollY || 0;
+            header.classList.toggle('spider-menu-scrolled', y > 10);
+
+            if(cfg.autoHide){
+                header.classList.toggle('spider-menu-hidden', y > lastY && y > 90);
+            }
+
+            if(progress && cfg.progress){
+                const h = document.documentElement;
+                const max = Math.max(1, h.scrollHeight - h.clientHeight);
+                progress.style.width = Math.min(100, Math.max(0, (y / max) * 100)) + '%';
+            }
+
+            lastY = y;
+        }
+
+        window.addEventListener('scroll', onScroll, {passive:true});
+        onScroll();
+
+        if(cfg.ctaEnabled){
+            const nav = header.querySelector('.nav-menu') || header.querySelector('nav');
+            if(nav && !nav.querySelector('.spider-menu-cta')){
+                const a = document.createElement('a');
+                a.className = 'spider-menu-cta';
+                a.href = cfg.ctaUrl || '#';
+                a.textContent = cfg.ctaText || 'Umów wizytę';
+                nav.appendChild(a);
+            }
+        }
+
+        document.querySelectorAll('.menu-toggle,.hamburger,.nav-toggle,[data-menu-toggle]').forEach(function(btn){
+            btn.addEventListener('click', function(e){
+                e.preventDefault();
+                document.body.classList.toggle('spider-site-menu-open');
+            });
+        });
+
+        if(cfg.mobileAutoclose){
+            document.querySelectorAll('.nav-menu a,.site-header nav a').forEach(function(a){
+                a.addEventListener('click', function(){
+                    document.body.classList.remove('spider-site-menu-open');
+                });
+            });
+        }
+    });
+})();
+</script>
+PHP;
+
+    $file = str_replace('__PAYLOAD__', $payload, $file);
+    file_put_contents(__DIR__ . '/site-menu-behavior.php', $file, LOCK_EX);
+}
+
+function spidercms_ensure_site_menu_behavior_in_header() {
+    $header = __DIR__ . '/header.php';
+    if (!is_file($header)) return false;
+
+    $content = (string)file_get_contents($header);
+    if (strpos($content, 'site-menu-behavior.php') !== false) return true;
+
+    $include = "<?php if (file_exists(__DIR__ . '/site-menu-behavior.php')) require_once __DIR__ . '/site-menu-behavior.php'; ?>\n";
+
+    if (stripos($content, '</head>') !== false) {
+        $content = str_ireplace('</head>', $include . '</head>', $content);
+    } else {
+        $content .= "\n" . $include;
+    }
+
+    return file_put_contents($header, $content, LOCK_EX) !== false;
+}
+
 // ----------------------------------------------------------------------
 // Wczytanie ustawień stopki
 // ----------------------------------------------------------------------
@@ -708,6 +1349,9 @@ if ($homepage_slug === '') {
 // ----------------------------------------------------------------------
 // MEDIA LIBRARY - dodaj tutaj
 // ----------------------------------------------------------------------
+spidercms_write_site_menu_behavior_file();
+spidercms_ensure_site_menu_behavior_in_header();
+
 $uploads_dir = __DIR__ . '/uploads/';
 if (!is_dir($uploads_dir)) {
     mkdir($uploads_dir, 0755, true);
@@ -3252,7 +3896,38 @@ function spidercms_live_sanitize_html($html) {
     return trim($html);
 }
 
+
+function spidercms_replace_page_content_source($source, $new_content) {
+    $source = (string)$source;
+    $new_content = (string)$new_content;
+
+    // Supports:
+    // $content = <<<HTML ... HTML;
+    // $content = <<<'HTML' ... HTML;
+    // $content = <<<"HTML" ... HTML;
+    $heredoc_pattern = '/\$content\s*=\s*<<<[ \t]*(?:[\'"]?HTML[\'"]?)[ \t]*\R.*?\RHTML[ \t]*;/s';
+
+    if (preg_match($heredoc_pattern, $source)) {
+        return preg_replace_callback($heredoc_pattern, function() use ($new_content) {
+            return '$content = <<<HTML' . "\n" . $new_content . "\n" . 'HTML;';
+        }, $source, 1);
+    }
+
+    // Fallback for pages that do not use $content but have a <main> block.
+    if (preg_match('/<main\b[^>]*>.*?<\/main>/is', $source)) {
+        return preg_replace_callback('/(<main\b[^>]*>).*?(<\/main>)/is', function($m) use ($new_content) {
+            return $m[1] . "\n" . $new_content . "\n" . $m[2];
+        }, $source, 1);
+    }
+
+    return false;
+}
+
 function spidercms_live_save_content_to_page($path, $new_content) {
+    if (!is_file($path) || !is_writable($path)) {
+        return false;
+    }
+
     $source = (string)file_get_contents($path);
     $new_content = spidercms_live_restore_shortcodes_from_editor($new_content);
     $new_content = spidercms_live_sanitize_html($new_content);
@@ -3261,21 +3936,8 @@ function spidercms_live_save_content_to_page($path, $new_content) {
         spidercms_live_create_backup($path);
     }
 
-    if (preg_match('/\$content\s*=\s*<<<HTML\s*(.*?)\s*HTML;/s', $source)) {
-        $updated = preg_replace(
-            '/\$content\s*=\s*<<<HTML\s*(.*?)\s*HTML;/s',
-            '$content = <<<HTML' . "\n" . $new_content . "\n" . 'HTML;',
-            $source,
-            1
-        );
-    } elseif (preg_match('/<main\b[^>]*>.*?<\/main>/is', $source)) {
-        $updated = preg_replace(
-            '/(<main\b[^>]*>).*?(<\/main>)/is',
-            '$1' . "\n" . $new_content . "\n" . '$2',
-            $source,
-            1
-        );
-    } else {
+    $updated = spidercms_replace_page_content_source($source, $new_content);
+    if ($updated === false) {
         return false;
     }
 
@@ -3322,7 +3984,7 @@ if (($_POST['action'] ?? '') === 'live_editor_save') {
     header('Content-Type: application/json; charset=utf-8');
     echo json_encode([
         'ok' => $ok,
-        'message' => $ok ? 'Zapisano zmiany LIVE.' : 'Nie udało się zapisać zmian.'
+        'message' => $ok ? 'Zapisano zmiany LIVE.' : 'Nie udało się zapisać zmian. Sprawdź czy strona ma blok $content lub <main> oraz prawa zapisu pliku.'
     ], JSON_UNESCAPED_UNICODE);
     exit;
 }
@@ -5059,15 +5721,157 @@ if ($public_action === 'stats_track') {
     chat_send_json(stats_track_event($_POST));
 }
 
+
+// ----------------------------------------------------------------------
+// Obsługa resetu hasła z ekranu logowania
+// ----------------------------------------------------------------------
+$reset_notice = '';
+$reset_error = '';
+
+if (!empty($_GET['reset_token']) && (!isset($_SESSION['logged_in']) || $_SESSION['logged_in'] !== true)) {
+    $reset_token = trim((string)$_GET['reset_token']);
+
+    if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['reset_token'], $_POST['new_password'], $_POST['repeat_password'])) {
+        if (!hash_equals((string)$_POST['reset_token'], $reset_token)) {
+            $reset_error = 'Nieprawidłowy token resetu.';
+        } elseif ((string)$_POST['new_password'] !== (string)$_POST['repeat_password']) {
+            $reset_error = 'Hasła nie są takie same.';
+        } elseif (strlen((string)$_POST['new_password']) < 6) {
+            $reset_error = 'Nowe hasło musi mieć minimum 6 znaków.';
+        } elseif (spidercms_password_reset_apply($reset_token, (string)$_POST['new_password'])) {
+            $reset_notice = 'Hasło zostało zmienione. Możesz się teraz zalogować.';
+        } else {
+            $reset_error = 'Nie udało się zresetować hasła. Link mógł wygasnąć.';
+        }
+    }
+
+    if ($reset_notice === '' && !spidercms_password_reset_get_valid($reset_token)) {
+        $reset_error = $reset_error !== '' ? $reset_error : 'Link resetu hasła jest nieprawidłowy albo wygasł.';
+    }
+
+    ?>
+    <!DOCTYPE html>
+    <html lang="pl">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Reset hasła – SpiderCMS</title>
+        <link rel="icon" type="image/png" href="/assets/images/spidercms-icon.png">
+        <style>
+            body{font-family:system-ui,sans-serif;background:linear-gradient(135deg,#0f172a,#1e293b);display:flex;justify-content:center;align-items:center;min-height:100vh;margin:0;}
+            .card{background:#1e293b;padding:2.5rem 2.2rem;border-radius:14px;box-shadow:0 10px 40px rgba(0,0,0,0.4);width:100%;max-width:420px;border:1px solid #334155;color:#f8fafc;}
+            h1{text-align:center;color:#a855f7;margin:0 0 1rem;font-size:1.9rem;font-weight:700;}
+            input{width:100%;padding:1rem;margin:.65rem 0;border:1px solid #334155;background:#0f172a;color:#f8fafc;border-radius:8px;font-size:1.05rem;box-sizing:border-box;}
+            button,.btn{width:100%;padding:1rem;background:#a855f7;color:white;border:none;border-radius:8px;font-size:1.05rem;font-weight:600;cursor:pointer;text-decoration:none;display:block;text-align:center;box-sizing:border-box;}
+            button:hover,.btn:hover{background:#7e22ce;}
+            .error{color:#fca5a5;background:rgba(239,68,68,.12);border:1px solid rgba(239,68,68,.35);padding:.75rem;border-radius:8px;text-align:center;margin-bottom:1rem;}
+            .success{color:#bbf7d0;background:rgba(34,197,94,.12);border:1px solid rgba(34,197,94,.35);padding:.75rem;border-radius:8px;text-align:center;margin-bottom:1rem;}
+            a{color:#c084fc;text-decoration:none}
+        </style>
+    </head>
+    <body>
+        <div class="card">
+            <h1>Reset hasła</h1>
+
+            <?php if ($reset_notice): ?>
+                <div class="success"><?= e($reset_notice) ?></div>
+                <a class="btn" href="admin.php">Wróć do logowania</a>
+            <?php else: ?>
+                <?php if ($reset_error): ?><div class="error"><?= e($reset_error) ?></div><?php endif; ?>
+                <?php if (spidercms_password_reset_get_valid($reset_token)): ?>
+                    <form method="post">
+                        <input type="hidden" name="reset_token" value="<?= e($reset_token) ?>">
+                        <input type="password" name="new_password" placeholder="Nowe hasło" required minlength="6" autofocus>
+                        <input type="password" name="repeat_password" placeholder="Powtórz nowe hasło" required minlength="6">
+                        <button type="submit">Ustaw nowe hasło</button>
+                    </form>
+                <?php endif; ?>
+                <p style="text-align:center;margin-top:1rem;"><a href="admin.php">Wróć do logowania</a></p>
+            <?php endif; ?>
+        </div>
+    </body>
+    </html>
+    <?php
+    exit;
+}
+
+if (($_GET['forgot'] ?? '') === '1' && (!isset($_SESSION['logged_in']) || $_SESSION['logged_in'] !== true)) {
+    if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['reset_login'])) {
+        $reset = spidercms_password_reset_create_token($_POST['reset_login']);
+        spidercms_log_action('password_reset_request', $reset ? 'success' : 'warning', ['login' => $_POST['reset_login'] ?? '']);
+
+        // Zawsze pokazujemy neutralny komunikat, żeby nie ujawniać, czy konto istnieje.
+        $reset_notice = 'Jeżeli konto istnieje, przygotowano link resetu hasła.';
+
+        if ($reset && !empty($reset['user']['email'])) {
+            $sent = spidercms_password_reset_send_email($reset['user']['email'], $reset['url'], $reset['user']['username'] ?? '');
+            if (!$sent) {
+                $reset_notice .= ' Nie udało się wysłać e-maila przez funkcję mail(). Link awaryjny zapisano w pliku .users/password_reset_last.txt.';
+                @file_put_contents(SPIDERCMS_ADMIN_USERS_DIR . '/password_reset_last.txt', $reset['url'], LOCK_EX);
+                @chmod(SPIDERCMS_ADMIN_USERS_DIR . '/password_reset_last.txt', 0640);
+            }
+        } elseif ($reset) {
+            $reset_notice .= ' Konto nie ma adresu e-mail, więc link awaryjny zapisano w pliku .users/password_reset_last.txt.';
+            @file_put_contents(SPIDERCMS_ADMIN_USERS_DIR . '/password_reset_last.txt', $reset['url'], LOCK_EX);
+            @chmod(SPIDERCMS_ADMIN_USERS_DIR . '/password_reset_last.txt', 0640);
+        }
+    }
+    ?>
+    <!DOCTYPE html>
+    <html lang="pl">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Nie pamiętasz hasła? – SpiderCMS</title>
+        <link rel="icon" type="image/png" href="/assets/images/spidercms-icon.png">
+        <style>
+            body{font-family:system-ui,sans-serif;background:linear-gradient(135deg,#0f172a,#1e293b);display:flex;justify-content:center;align-items:center;min-height:100vh;margin:0;}
+            .card{background:#1e293b;padding:2.5rem 2.2rem;border-radius:14px;box-shadow:0 10px 40px rgba(0,0,0,0.4);width:100%;max-width:420px;border:1px solid #334155;color:#f8fafc;}
+            h1{text-align:center;color:#a855f7;margin:0 0 1rem;font-size:1.9rem;font-weight:700;}
+            p{color:#cbd5e1;line-height:1.55}
+            input{width:100%;padding:1rem;margin:.75rem 0;border:1px solid #334155;background:#0f172a;color:#f8fafc;border-radius:8px;font-size:1.05rem;box-sizing:border-box;}
+            button,.btn{width:100%;padding:1rem;background:#a855f7;color:white;border:none;border-radius:8px;font-size:1.05rem;font-weight:600;cursor:pointer;text-decoration:none;display:block;text-align:center;box-sizing:border-box;}
+            button:hover,.btn:hover{background:#7e22ce;}
+            .success{color:#bbf7d0;background:rgba(34,197,94,.12);border:1px solid rgba(34,197,94,.35);padding:.75rem;border-radius:8px;text-align:center;margin-bottom:1rem;}
+            a{color:#c084fc;text-decoration:none}
+        </style>
+    </head>
+    <body>
+        <div class="card">
+            <h1>Nie pamiętasz hasła?</h1>
+            <?php if ($reset_notice): ?>
+                <div class="success"><?= e($reset_notice) ?></div>
+                <a class="btn" href="admin.php">Wróć do logowania</a>
+            <?php else: ?>
+                <p>Podaj login lub adres e-mail konta. Jeśli konto istnieje, zostanie utworzony link resetu hasła ważny przez 1 godzinę.</p>
+                <form method="post">
+                    <input type="text" name="reset_login" placeholder="Login lub e-mail" required autofocus>
+                    <button type="submit">Zresetuj hasło</button>
+                </form>
+                <p style="text-align:center;margin-top:1rem;"><a href="admin.php">Wróć do logowania</a></p>
+            <?php endif; ?>
+        </div>
+    </body>
+    </html>
+    <?php
+    exit;
+}
+
+
 // ----------------------------------------------------------------------
 // Ekran logowania
 // ----------------------------------------------------------------------
 if (!isset($_SESSION['logged_in']) || $_SESSION['logged_in'] !== true) {
     if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['password']) && $_SESSION['login_block_until'] <= time()) {
-        if (password_verify($_POST['password'], $ADMIN_HASH)) {
+        $spidercms_login_user = spidercms_admin_authenticate_user($_POST['username'] ?? 'admin', $_POST['password'] ?? '', $ADMIN_HASH);
+        if ($spidercms_login_user !== false) {
             spidercms_log_action('login_success', 'success');
             spidercms_security_log('login_success');
             $_SESSION['logged_in'] = true;
+            $_SESSION['admin_user_id'] = $spidercms_login_user['id'] ?? '';
+            $_SESSION['admin_username'] = $spidercms_login_user['username'] ?? 'admin';
+            $_SESSION['admin_display_name'] = $spidercms_login_user['display_name'] ?? ($_SESSION['admin_username'] ?? 'admin');
+            $_SESSION['admin_user_role'] = $spidercms_login_user['role'] ?? 'admin';
             $_SESSION['last_activity'] = time();
             $_SESSION['login_attempts'] = 0;
             $_SESSION['login_block_until'] = 0;
@@ -5120,9 +5924,13 @@ if (!isset($_SESSION['logged_in']) || $_SESSION['logged_in'] !== true) {
             <?php endif; ?>
             <?php if ($_SESSION['login_block_until'] <= time()): ?>
                 <form method="post">
-                    <input type="password" name="password" placeholder="Hasło" required autofocus>
+                    <input type="text" name="username" placeholder="Login" value="admin" required autocomplete="username" autofocus>
+                    <input type="password" name="password" placeholder="Hasło" required autocomplete="current-password">
                     <button type="submit">Zaloguj się</button>
                 </form>
+                    <p style="text-align:center;margin:.9rem 0 0;">
+                        <a href="admin.php?forgot=1" style="color:#c084fc;text-decoration:none;font-weight:600;">Nie pamiętasz hasła?</a>
+                    </p>
             <?php else: ?>
                 <p style="text-align:center; margin-top:1.5rem;">Spróbuj ponownie za chwilę.</p>
             <?php endif; ?>
@@ -5136,6 +5944,15 @@ if (!isset($_SESSION['logged_in']) || $_SESSION['logged_in'] !== true) {
 // Panel zalogowany
 // ----------------------------------------------------------------------
 $tab = $_GET['tab'] ?? 'dashboard';
+
+if ($tab === 'ustawienia' && !spidercms_admin_can_access_settings()) {
+    spidercms_log_action('permission_denied_settings_tab', 'error', [
+        'role' => spidercms_admin_current_role(),
+        'username' => spidercms_admin_current_username()
+    ]);
+    $toast = ['type'=>'error','msg'=>'Brak uprawnień do zakładki Ustawienia.'];
+    $tab = 'dashboard';
+}
 $spidercms_is_page_edit_mode = isset($_GET['edit']) || isset($_GET['edit_page']) || (($_GET['action'] ?? '') === 'edit') || (($_GET['mode'] ?? '') === 'edit');
 
 // ----------------------------------------------------------------------
@@ -5167,6 +5984,122 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $action = $_POST['action'] ?? '';
     verify_csrf_or_die();
     spidercms_log_action($action !== '' ? $action : 'unknown_post', 'info', $_POST);
+
+    if (in_array($action, spidercms_admin_settings_actions(), true) && !spidercms_admin_can_access_settings()) {
+        spidercms_log_action('permission_denied_settings_action', 'error', [
+            'blocked_action' => $action,
+            'role' => spidercms_admin_current_role(),
+            'username' => spidercms_admin_current_username()
+        ]);
+        $toast = ['type'=>'error','msg'=>'Brak uprawnień do zmiany ustawień witryny.'];
+        $action = '__permission_denied_settings__';
+    }
+
+
+    if (in_array($action, ['add_admin_user','update_admin_user','delete_admin_user'], true)) {
+        spidercms_admin_require_role(['admin']);
+        $users = spidercms_admin_users_load();
+
+        if ($action === 'add_admin_user') {
+            $username = spidercms_admin_user_clean_username($_POST['username'] ?? '');
+            $password = (string)($_POST['password'] ?? '');
+            $exists = false;
+
+            foreach ($users as $u) {
+                if (($u['username'] ?? '') === $username) { $exists = true; break; }
+            }
+
+            if ($username === '' || strlen($password) < 6) {
+                $toast = ['type'=>'error','msg'=>'Podaj login oraz hasło minimum 6 znaków.'];
+            } elseif ($exists) {
+                $toast = ['type'=>'error','msg'=>'Użytkownik o takim loginie już istnieje.'];
+            } else {
+                $users[] = [
+                    'id' => 'adm_' . date('YmdHis') . '_' . bin2hex(random_bytes(4)),
+                    'username' => $username,
+                    'display_name' => trim((string)($_POST['display_name'] ?? $username)),
+                    'email' => filter_var($_POST['email'] ?? '', FILTER_VALIDATE_EMAIL) ? trim((string)$_POST['email']) : '',
+                    'role' => spidercms_admin_user_clean_role($_POST['role'] ?? 'editor'),
+                    'password_hash' => password_hash($password, PASSWORD_DEFAULT),
+                    'active' => true,
+                    'created_at' => date('Y-m-d H:i:s'),
+                    'last_login_at' => '',
+                    'last_login_ip_hash' => '',
+                ];
+                spidercms_admin_users_save($users);
+                spidercms_log_action('add_admin_user', 'success', ['username' => $username]);
+                header('Location: admin.php?tab=uzytkownicy&saved=1');
+                exit;
+            }
+        }
+
+        if ($action === 'update_admin_user') {
+            $id = (string)($_POST['user_id'] ?? '');
+            $updated = false;
+
+            foreach ($users as &$user) {
+                if (($user['id'] ?? '') !== $id) continue;
+
+                $is_self = (($user['username'] ?? '') === spidercms_admin_current_username());
+                $user['display_name'] = trim((string)($_POST['display_name'] ?? ($user['display_name'] ?? '')));
+                $user['email'] = filter_var($_POST['email'] ?? '', FILTER_VALIDATE_EMAIL) ? trim((string)$_POST['email']) : '';
+
+                if (!$is_self) {
+                    $user['role'] = spidercms_admin_user_clean_role($_POST['role'] ?? ($user['role'] ?? 'editor'));
+                    $user['active'] = isset($_POST['active']);
+                } else {
+                    $user['active'] = true;
+                }
+
+                $new_password = (string)($_POST['new_password'] ?? '');
+                if ($new_password !== '') {
+                    if (strlen($new_password) < 6) {
+                        $toast = ['type'=>'error','msg'=>'Nowe hasło musi mieć minimum 6 znaków.'];
+                        break;
+                    }
+                    $user['password_hash'] = password_hash($new_password, PASSWORD_DEFAULT);
+                }
+
+                $updated = true;
+                break;
+            }
+            unset($user);
+
+            if ($updated && $toast['type'] !== 'error') {
+                spidercms_admin_users_save($users);
+                spidercms_log_action('update_admin_user', 'success', ['user_id' => $id]);
+                header('Location: admin.php?tab=uzytkownicy&saved=1');
+                exit;
+            } elseif ($toast['type'] !== 'error') {
+                $toast = ['type'=>'error','msg'=>'Nie znaleziono użytkownika.'];
+            }
+        }
+
+        if ($action === 'delete_admin_user') {
+            $id = (string)($_POST['user_id'] ?? '');
+            $current = spidercms_admin_current_username();
+            $new = [];
+            $deleted = false;
+
+            foreach ($users as $user) {
+                if (($user['id'] ?? '') === $id && (($user['username'] ?? '') !== $current)) {
+                    $deleted = true;
+                    continue;
+                }
+                $new[] = $user;
+            }
+
+            if ($deleted) {
+                spidercms_admin_users_save($new);
+                spidercms_log_action('delete_admin_user', 'success', ['user_id' => $id]);
+                header('Location: admin.php?tab=uzytkownicy&deleted=1');
+                exit;
+            } else {
+                $toast = ['type'=>'error','msg'=>'Nie można usunąć tego użytkownika.'];
+            }
+        }
+    }
+
 
     if ($action === 'clear_action_logs') {
         @file_put_contents(SPIDERCMS_ACTION_LOG_FILE, '');
@@ -5637,22 +6570,27 @@ PHP;
                 $toast = ['type'=>'error', 'msg'=>'Nie można zmienić sluga. Plik ' . $new_slug . '.php już istnieje.'];
             } else {
                 $old = file_get_contents($old_file);
-                if (preg_match('/\$content\s*=\s*<<<HTML\s*(.*?)\s*HTML;/s', $old, $m)) {
-                    $updated = str_replace($m[1], $new_content, $old);
+                $updated = spidercms_replace_page_content_source($old, $new_content);
+
+                if ($updated !== false) {
                     if ($new_title !== '') {
                         $updated = spidercms_page_set_title_in_source($updated, $new_title);
                     }
-                    file_put_contents($new_file, $updated);
-                    if ($new_slug !== $old_slug && file_exists($old_file)) {
-                        @unlink($old_file);
-                    }
-                    $toast = ['type'=>'success', 'msg'=>'Zapisano zmiany strony.'];
-                    if ($new_slug !== $old_slug) {
-                        header('Location: admin.php?tab=strony&edit=' . urlencode($new_slug) . '&renamed=1');
-                        exit;
+
+                    if (file_put_contents($new_file, $updated, LOCK_EX) !== false) {
+                        if ($new_slug !== $old_slug && file_exists($old_file)) {
+                            @unlink($old_file);
+                        }
+                        $toast = ['type'=>'success', 'msg'=>'Zapisano zmiany strony.'];
+                        if ($new_slug !== $old_slug) {
+                            header('Location: admin.php?tab=strony&edit=' . urlencode($new_slug) . '&renamed=1');
+                            exit;
+                        }
+                    } else {
+                        $toast = ['type'=>'error', 'msg'=>'Nie można zapisać pliku strony. Sprawdź uprawnienia pliku/katalogu.'];
                     }
                 } else {
-                    $toast = ['type'=>'error', 'msg'=>'Nie znaleziono bloku treści'];
+                    $toast = ['type'=>'error', 'msg'=>'Nie znaleziono edytowalnego bloku treści ($content lub <main>).'];
                 }
             }
         }
@@ -6246,7 +7184,9 @@ PHP;
             spidercms_force_theme_refresh();
             // Wyłączone: nie modyfikujemy stron przy samym wejściu do panelu.
 // spidercms_sync_content_width_in_pages();
-            header('Location: admin.php?tab=ustawienia');
+                    spidercms_write_site_menu_behavior_file();
+        spidercms_ensure_site_menu_behavior_in_header();
+header('Location: admin.php?tab=ustawienia');
             exit;
         }
     }
@@ -6912,7 +7852,408 @@ function render_editor_tools() {
         }
 
 
+/* SPIDERCMS MOBILE HARD FIX START */
+:root{
+    --spidercms-mobile-sidebar-width: min(330px, 88vw);
+}
 
+.spidercms-mobile-topbar,
+.spidercms-mobile-backdrop{
+    display:none;
+}
+
+@media (max-width: 1024px){
+    html,
+    body{
+        width:100%!important;
+        max-width:100%!important;
+        overflow-x:hidden!important;
+    }
+
+    body{
+        min-width:0!important;
+    }
+
+    .spidercms-mobile-topbar{
+        display:flex!important;
+        position:fixed!important;
+        top:0!important;
+        left:0!important;
+        right:0!important;
+        height:58px!important;
+        z-index:2147483000!important;
+        align-items:center!important;
+        gap:10px!important;
+        padding:8px 12px!important;
+        background:linear-gradient(135deg,#0f172a,#1e293b)!important;
+        color:#fff!important;
+        box-shadow:0 10px 30px rgba(0,0,0,.28)!important;
+    }
+
+    .spidercms-mobile-btn{
+        width:42px!important;
+        height:42px!important;
+        min-width:42px!important;
+        border:0!important;
+        border-radius:13px!important;
+        background:linear-gradient(135deg,#a855f7,#2563eb)!important;
+        color:#fff!important;
+        font-size:24px!important;
+        line-height:1!important;
+        font-weight:900!important;
+        display:flex!important;
+        align-items:center!important;
+        justify-content:center!important;
+        cursor:pointer!important;
+        padding:0!important;
+        margin:0!important;
+    }
+
+    .spidercms-mobile-title{
+        font-size:15px!important;
+        font-weight:800!important;
+        white-space:nowrap!important;
+        overflow:hidden!important;
+        text-overflow:ellipsis!important;
+    }
+
+    .spidercms-mobile-backdrop{
+        position:fixed!important;
+        inset:0!important;
+        background:rgba(2,6,23,.66)!important;
+        z-index:2147482990!important;
+    }
+
+    body.spidercms-menu-open .spidercms-mobile-backdrop{
+        display:block!important;
+    }
+
+    /* Najczęstsze wrappery panelu */
+    .layout,
+    .admin-layout,
+    .panel-layout,
+    .dashboard-layout,
+    .app-layout,
+    body > .layout,
+    body > .admin-layout{
+        display:block!important;
+        grid-template-columns:1fr!important;
+        width:100%!important;
+        max-width:100%!important;
+        min-width:0!important;
+        margin:0!important;
+    }
+
+    /* Lewy sidebar */
+    .sidebar,
+    aside.sidebar,
+    .admin-sidebar,
+    .side-menu,
+    nav.sidebar{
+        position:fixed!important;
+        top:0!important;
+        left:0!important;
+        bottom:0!important;
+        width:var(--spidercms-mobile-sidebar-width)!important;
+        max-width:88vw!important;
+        min-width:0!important;
+        height:100vh!important;
+        max-height:100vh!important;
+        z-index:2147482999!important;
+        transform:translateX(-110%)!important;
+        transition:transform .24s ease!important;
+        overflow-y:auto!important;
+        overflow-x:hidden!important;
+        overscroll-behavior:contain!important;
+        padding-top:74px!important;
+        box-shadow:24px 0 80px rgba(0,0,0,.42)!important;
+    }
+
+    body.spidercms-menu-open .sidebar,
+    body.spidercms-menu-open aside.sidebar,
+    body.spidercms-menu-open .admin-sidebar,
+    body.spidercms-menu-open .side-menu,
+    body.spidercms-menu-open nav.sidebar{
+        transform:translateX(0)!important;
+    }
+
+    .sidebar *,
+    aside.sidebar *,
+    .admin-sidebar *,
+    .side-menu *{
+        max-width:100%!important;
+    }
+
+    .nav,
+    .sidebar nav,
+    aside.sidebar nav{
+        display:flex!important;
+        flex-direction:column!important;
+        gap:8px!important;
+    }
+
+    .nav a,
+    .sidebar a,
+    aside.sidebar a{
+        white-space:normal!important;
+        word-break:break-word!important;
+    }
+
+    /* Główna treść */
+    .main,
+    main.main,
+    .admin-main,
+    .content,
+    .admin-content,
+    .panel-content,
+    .page-content,
+    .workspace,
+    section.main{
+        width:100%!important;
+        max-width:100%!important;
+        min-width:0!important;
+        margin:0!important;
+        margin-left:0!important;
+        padding:74px 12px 24px!important;
+        overflow-x:hidden!important;
+        box-sizing:border-box!important;
+    }
+
+    /* Nagłówki/karty */
+    .topbar,
+    .admin-topbar,
+    .page-head,
+    .page-header,
+    .section-head,
+    .toolbar{
+        display:flex!important;
+        flex-direction:column!important;
+        align-items:stretch!important;
+        justify-content:flex-start!important;
+        gap:12px!important;
+        width:100%!important;
+        max-width:100%!important;
+    }
+
+    h1{
+        font-size:clamp(1.35rem, 7vw, 2rem)!important;
+        line-height:1.15!important;
+        overflow-wrap:anywhere!important;
+    }
+
+    h2{
+        font-size:clamp(1.15rem, 5.5vw, 1.55rem)!important;
+        line-height:1.2!important;
+    }
+
+    .grid,
+    .settings-grid,
+    .cards-grid,
+    .dashboard-grid,
+    .stats-grid,
+    .form-grid,
+    .two-col,
+    .three-col,
+    .columns{
+        display:grid!important;
+        grid-template-columns:1fr!important;
+        gap:14px!important;
+        width:100%!important;
+        max-width:100%!important;
+        min-width:0!important;
+    }
+
+    .card,
+    .box,
+    .panel,
+    .panel-card,
+    .settings-card,
+    .module-card,
+    .stat-card,
+    .card.half,
+    .card.third,
+    .card.two,
+    .card.three{
+        grid-column:1 / -1!important;
+        width:100%!important;
+        max-width:100%!important;
+        min-width:0!important;
+        margin-left:0!important;
+        margin-right:0!important;
+        padding:15px!important;
+        border-radius:18px!important;
+        box-sizing:border-box!important;
+        overflow:hidden!important;
+    }
+
+    /* Formularze */
+    form,
+    fieldset,
+    .form-row,
+    .form-group,
+    .input-group,
+    .settings-row{
+        width:100%!important;
+        max-width:100%!important;
+        min-width:0!important;
+        box-sizing:border-box!important;
+    }
+
+    label{
+        max-width:100%!important;
+        overflow-wrap:anywhere!important;
+    }
+
+    input,
+    select,
+    textarea{
+        width:100%!important;
+        max-width:100%!important;
+        min-width:0!important;
+        box-sizing:border-box!important;
+    }
+
+    textarea{
+        min-height:150px!important;
+    }
+
+    .actions,
+    .btn-row,
+    .form-actions,
+    .button-row,
+    .toolbar-actions{
+        display:flex!important;
+        flex-wrap:wrap!important;
+        align-items:stretch!important;
+        gap:8px!important;
+        width:100%!important;
+        max-width:100%!important;
+    }
+
+    .btn,
+    button,
+    input[type="submit"],
+    .button{
+        max-width:100%!important;
+        white-space:normal!important;
+        overflow-wrap:anywhere!important;
+    }
+
+    /* Tabele jako poziomo przewijane */
+    table{
+        display:block!important;
+        width:100%!important;
+        max-width:100%!important;
+        overflow-x:auto!important;
+        -webkit-overflow-scrolling:touch!important;
+        white-space:nowrap!important;
+        border-collapse:separate!important;
+    }
+
+    thead,
+    tbody,
+    tr{
+        width:100%!important;
+    }
+
+    th,
+    td{
+        white-space:nowrap!important;
+    }
+
+    /* Edytor TinyMCE */
+    .tox,
+    .tox-tinymce,
+    .tox-editor-container,
+    .tox-sidebar-wrap,
+    .tox-edit-area{
+        max-width:100%!important;
+        width:100%!important;
+        min-width:0!important;
+        box-sizing:border-box!important;
+    }
+
+    .tox-toolbar,
+    .tox-toolbar__primary,
+    .tox-toolbar__overflow{
+        flex-wrap:wrap!important;
+    }
+
+    /* Media, menu, slider */
+    img,
+    video,
+    iframe{
+        max-width:100%!important;
+        height:auto;
+    }
+
+    .menu-row,
+    .submenu-row,
+    .slider-row,
+    .media-row,
+    .log-row,
+    .preset-row{
+        display:grid!important;
+        grid-template-columns:1fr!important;
+        gap:10px!important;
+        width:100%!important;
+        max-width:100%!important;
+    }
+
+    .media-grid,
+    .gallery-grid,
+    .uploads-grid,
+    .preset-grid{
+        display:grid!important;
+        grid-template-columns:repeat(2, minmax(0, 1fr))!important;
+        gap:10px!important;
+    }
+}
+
+@media (max-width: 560px){
+    .main,
+    main.main,
+    .admin-main,
+    .content,
+    .admin-content,
+    .panel-content,
+    .page-content,
+    .workspace,
+    section.main{
+        padding-left:9px!important;
+        padding-right:9px!important;
+    }
+
+    .card,
+    .box,
+    .panel,
+    .panel-card,
+    .settings-card,
+    .module-card,
+    .stat-card{
+        padding:12px!important;
+        border-radius:15px!important;
+    }
+
+    .actions .btn,
+    .actions button,
+    .form-actions .btn,
+    .form-actions button,
+    .btn-row .btn,
+    .btn-row button{
+        width:100%!important;
+        justify-content:center!important;
+        text-align:center!important;
+    }
+
+    .media-grid,
+    .gallery-grid,
+    .uploads-grid,
+    .preset-grid{
+        grid-template-columns:1fr!important;
+    }
+}
+/* SPIDERCMS MOBILE HARD FIX END */
 
 
 
@@ -6929,214 +8270,57 @@ function render_editor_tools() {
 
 
 
-/* SPIDERCMS CURRENT ADMIN MOBILE FIX START */
-@media (max-width: 1024px) {
-    html,
-    body {
-        width: 100% !important;
-        max-width: 100% !important;
-        min-width: 0 !important;
-        overflow-x: hidden !important;
-    }
-
-    body {
-        display: block !important;
-        min-height: 100vh !important;
-    }
-
-    body.spidercms-sidebar-open {
-        overflow: hidden !important;
-    }
-
-    .spidercms-mobile-topbar {
-        display: flex !important;
-        position: fixed !important;
-        top: 0 !important;
-        left: 0 !important;
-        right: 0 !important;
-        height: 64px !important;
-        z-index: 1400 !important;
-        align-items: center !important;
-        justify-content: space-between !important;
-        gap: .8rem !important;
-        padding: .85rem 1rem !important;
-        background: #0f172a !important;
-        border-bottom: 1px solid #334155 !important;
-        box-shadow: 0 10px 24px rgba(0,0,0,.22) !important;
-        box-sizing: border-box !important;
-    }
-
-    .spidercms-mobile-brand {
-        display: flex !important;
-        align-items: center !important;
-        gap: .65rem !important;
-        font-weight: 900 !important;
-        color: #f8fafc !important;
-        min-width: 0 !important;
-    }
-
-    .spidercms-mobile-brand img {
-        height: 34px !important;
-        width: auto !important;
-        border-radius: 6px !important;
-    }
-
-    .spidercms-mobile-menu-btn {
-        display: inline-flex !important;
-        align-items: center !important;
-        justify-content: center !important;
-        gap: .45rem !important;
-        min-width: 46px !important;
-        height: 46px !important;
-        border: 1px solid #334155 !important;
-        background: #111827 !important;
-        color: #f8fafc !important;
-        border-radius: 12px !important;
-        padding: .68rem .9rem !important;
-        font-weight: 800 !important;
-        cursor: pointer !important;
-        box-sizing: border-box !important;
-    }
-
-    #sidebar {
-        position: fixed !important;
-        top: 0 !important;
-        left: 0 !important;
-        bottom: 0 !important;
-        width: min(86vw, 320px) !important;
-        max-width: 86vw !important;
-        min-width: 0 !important;
-        height: 100vh !important;
-        max-height: 100vh !important;
-        transform: translateX(-105%) !important;
-        transition: transform .22s ease !important;
-        z-index: 1500 !important;
-        overflow-y: auto !important;
-        overflow-x: hidden !important;
-        -webkit-overflow-scrolling: touch !important;
-        padding-top: 76px !important;
-        box-sizing: border-box !important;
-        box-shadow: 18px 0 50px rgba(0,0,0,.45) !important;
-    }
-
-    body.spidercms-sidebar-open #sidebar {
-        transform: translateX(0) !important;
-    }
-
-    .spidercms-sidebar-backdrop {
-        display: none !important;
-        position: fixed !important;
-        inset: 0 !important;
-        z-index: 1450 !important;
-        background: rgba(2,6,23,.68) !important;
-        backdrop-filter: blur(2px) !important;
-    }
-
-    body.spidercms-sidebar-open .spidercms-sidebar-backdrop {
-        display: block !important;
-    }
-
-    #main {
-        display: block !important;
-        flex: none !important;
-        width: 100% !important;
-        max-width: 100% !important;
-        min-width: 0 !important;
-        margin: 0 !important;
-        margin-left: 0 !important;
-        padding: 82px 12px 24px !important;
-        box-sizing: border-box !important;
-        overflow-x: hidden !important;
-    }
-
-    #main > header {
-        display: flex !important;
-        flex-direction: column !important;
-        align-items: stretch !important;
-        gap: .85rem !important;
-        padding: 1rem !important;
-        width: 100% !important;
-        max-width: 100% !important;
-        box-sizing: border-box !important;
-    }
-
-    #main > header h1,
-    #main h1,
-    #main h2,
-    #main h3,
-    #main p,
-    #main label,
-    #main span,
-    #main div {
-        word-break: normal !important;
-        overflow-wrap: break-word !important;
-    }
-
-    #main > header h1 {
-        font-size: 1.35rem !important;
-        line-height: 1.2 !important;
-    }
-
-    #main .card,
-    #main .box,
-    #main .panel,
-    #main .panel-card,
-    #main .settings-card,
-    #main section {
-        width: 100% !important;
-        max-width: 100% !important;
-        min-width: 0 !important;
-        box-sizing: border-box !important;
-        overflow: hidden !important;
-    }
-
-    #main table {
-        display: block !important;
-        width: 100% !important;
-        max-width: 100% !important;
-        overflow-x: auto !important;
-        -webkit-overflow-scrolling: touch !important;
-        white-space: nowrap !important;
-    }
-
-    #main input,
-    #main select,
-    #main textarea,
-    #main button,
-    #main .btn {
-        max-width: 100% !important;
-        box-sizing: border-box !important;
-    }
-
-    #main .tox,
-    #main .tox-tinymce,
-    #main .tox-editor-container,
-    #main .tox-sidebar-wrap,
-    #main .tox-edit-area {
-        width: 100% !important;
-        max-width: 100% !important;
-        min-width: 0 !important;
-        box-sizing: border-box !important;
+/* SPIDERCMS SITE MENU SETTINGS UI START */
+.site-menu-settings-panel{
+    margin-top:1.2rem;
+}
+.site-menu-settings-panel .site-menu-grid{
+    display:grid;
+    grid-template-columns:repeat(3,minmax(0,1fr));
+    gap:1rem;
+}
+.site-menu-settings-panel .site-menu-grid label,
+.site-menu-settings-panel .site-menu-cta-grid label{
+    display:flex;
+    flex-direction:column;
+    gap:.45rem;
+    min-width:0;
+}
+.site-menu-settings-panel input,
+.site-menu-settings-panel select{
+    width:100%;
+    max-width:100%;
+}
+.site-menu-settings-panel .site-menu-checks{
+    display:grid;
+    grid-template-columns:repeat(2,minmax(0,1fr));
+    gap:.75rem 1.2rem;
+    margin:1rem 0;
+}
+.site-menu-settings-panel .site-menu-checks label{
+    display:flex;
+    align-items:center;
+    gap:.55rem;
+    color:#cbd5e1;
+    min-width:0;
+}
+.site-menu-settings-panel .site-menu-checks input{
+    width:auto;
+    min-width:16px;
+}
+.site-menu-settings-panel .site-menu-cta-grid{
+    display:grid;
+    grid-template-columns:repeat(2,minmax(0,1fr));
+    gap:1rem;
+}
+@media(max-width:900px){
+    .site-menu-settings-panel .site-menu-grid,
+    .site-menu-settings-panel .site-menu-checks,
+    .site-menu-settings-panel .site-menu-cta-grid{
+        grid-template-columns:1fr;
     }
 }
-
-@media (max-width: 560px) {
-    #main {
-        padding-left: 9px !important;
-        padding-right: 9px !important;
-    }
-
-    #main .card {
-        padding: 12px !important;
-        border-radius: 15px !important;
-    }
-
-    #main th,
-    #main td {
-        padding: .7rem .75rem !important;
-    }
-}
-/* SPIDERCMS CURRENT ADMIN MOBILE FIX END */
+/* SPIDERCMS SITE MENU SETTINGS UI END */
 
 </style>
 
@@ -7213,6 +8397,7 @@ section[data-spidercms-purpose="create-page"]{
                 case 'slider': echo 'Slider zdjęć i shortcode'; break;
                 case 'statystyki': echo 'Statystyki odwiedzin'; break;
                 case 'logi': echo 'Logi akcji systemu'; break;
+                case 'uzytkownicy': echo 'Użytkownicy i role'; break;
                 case 'o-cms': echo 'O tym CMS-ie'; break;
                 default: echo 'Zarządzanie stronami';
             }
@@ -7278,9 +8463,20 @@ section[data-spidercms-purpose="create-page"]{
                     <a href="admin.php?tab=ustawienia" class="btn btn-edit" style="text-align:center; justify-content:center;">
                         <i class="fa-solid fa-palette"></i> Zmień kolory / logo
                     </a>
+                    <a href="admin.php?tab=uzytkownicy" class="btn btn-edit" style="text-align:center; justify-content:center;">
+                        <i class="fa-solid fa-users-gear"></i> Użytkownicy
+                    </a>
+
                 </div>
             </div>
         </div>
+
+    <?php elseif ($tab === 'uzytkownicy'): ?>
+        <?php if (!spidercms_admin_has_role(['admin'])): ?>
+            <div class="toast error">Brak uprawnień. Tylko Administrator może zarządzać użytkownikami.</div>
+        <?php else: ?>
+            <?= spidercms_admin_users_tab_html() ?>
+        <?php endif; ?>
     <?php elseif ($tab === 'stopka'): ?>
         <div class="card">
             <h2 style="color:var(--footer-color); margin-bottom: 1.5rem;"><i class="fa-solid fa-shoe-prints"></i> Konfiguracja stopki (Footer)</h2>
@@ -8556,7 +9752,152 @@ section[data-spidercms-purpose="create-page"]{
 
 
 
+/* SPIDERCMS MOBILE LAYOUT WIDTH FIX START */
+@media (max-width: 768px){
 
+    html,
+    body{
+        width:100%!important;
+        max-width:100%!important;
+        min-width:0!important;
+        overflow-x:hidden!important;
+    }
+
+    /* TO JEST GŁÓWNA NAPRAWA:
+       na telefonie panel nie może mieć układu sidebar + treść */
+    .layout,
+    .admin-layout,
+    .panel-layout,
+    .dashboard-layout,
+    .app-layout{
+        display:block!important;
+        grid-template-columns:none!important;
+        width:100%!important;
+        max-width:100%!important;
+        min-width:0!important;
+        margin:0!important;
+        overflow-x:hidden!important;
+    }
+
+    /* Sidebar jako overlay, ale bez usuwania istniejącego mechanizmu menu */
+    .sidebar,
+    aside.sidebar,
+    .admin-sidebar,
+    .side-menu{
+        position:fixed!important;
+        top:0!important;
+        left:0!important;
+        bottom:0!important;
+        width:min(320px,86vw)!important;
+        max-width:86vw!important;
+        min-width:0!important;
+        height:100vh!important;
+        max-height:100vh!important;
+        z-index:99998!important;
+        overflow-y:auto!important;
+        overflow-x:hidden!important;
+        -webkit-overflow-scrolling:touch!important;
+        box-sizing:border-box!important;
+    }
+
+    /* Jeżeli istniejący JS chowa/otwiera sidebar klasą, obsłuż różne nazwy */
+    body:not(.sidebar-open):not(.spidercms-menu-open):not(.spider-menu-open):not(.spidercms-mobile-sidebar-open) .sidebar,
+    body:not(.sidebar-open):not(.spidercms-menu-open):not(.spider-menu-open):not(.spidercms-mobile-sidebar-open) aside.sidebar,
+    body:not(.sidebar-open):not(.spidercms-menu-open):not(.spider-menu-open):not(.spidercms-mobile-sidebar-open) .admin-sidebar,
+    body:not(.sidebar-open):not(.spidercms-menu-open):not(.spider-menu-open):not(.spidercms-mobile-sidebar-open) .side-menu{
+        transform:translateX(-110%)!important;
+    }
+
+    body.sidebar-open .sidebar,
+    body.sidebar-open aside.sidebar,
+    body.sidebar-open .admin-sidebar,
+    body.sidebar-open .side-menu,
+    body.spidercms-menu-open .sidebar,
+    body.spidercms-menu-open aside.sidebar,
+    body.spidercms-menu-open .admin-sidebar,
+    body.spidercms-menu-open .side-menu,
+    body.spider-menu-open .sidebar,
+    body.spider-menu-open aside.sidebar,
+    body.spider-menu-open .admin-sidebar,
+    body.spider-menu-open .side-menu,
+    body.spidercms-mobile-sidebar-open .sidebar,
+    body.spidercms-mobile-sidebar-open aside.sidebar,
+    body.spidercms-mobile-sidebar-open .admin-sidebar,
+    body.spidercms-mobile-sidebar-open .side-menu{
+        transform:translateX(0)!important;
+    }
+
+    /* Treść ma zawsze pełną szerokość ekranu */
+    .main,
+    main.main,
+    .admin-main,
+    .content,
+    .admin-content,
+    .panel-content,
+    .page-content,
+    .workspace,
+    section.main,
+    #main,
+    #content{
+        display:block!important;
+        width:100%!important;
+        max-width:100%!important;
+        min-width:0!important;
+        margin:0!important;
+        margin-left:0!important;
+        margin-right:0!important;
+        box-sizing:border-box!important;
+        overflow-x:hidden!important;
+    }
+
+    /* Uporządkowanie zawartości tylko tam, gdzie wcześniej robiły się pionowe litery */
+    .card,
+    .box,
+    .panel-card,
+    .settings-card,
+    section{
+        width:100%!important;
+        max-width:100%!important;
+        min-width:0!important;
+        box-sizing:border-box!important;
+        overflow:hidden!important;
+    }
+
+    h1,h2,h3,p,label,span,div{
+        word-break:normal!important;
+        overflow-wrap:break-word!important;
+    }
+
+    table{
+        display:block!important;
+        width:100%!important;
+        max-width:100%!important;
+        overflow-x:auto!important;
+        -webkit-overflow-scrolling:touch!important;
+        white-space:nowrap!important;
+    }
+
+    input,
+    select,
+    textarea,
+    button,
+    .btn{
+        max-width:100%!important;
+        box-sizing:border-box!important;
+    }
+
+    .tox,
+    .tox-tinymce,
+    .tox-editor-container,
+    .tox-sidebar-wrap,
+    .tox-edit-area{
+        width:100%!important;
+        max-width:100%!important;
+        min-width:0!important;
+        box-sizing:border-box!important;
+    }
+}
+/* SPIDERCMS MOBILE LAYOUT WIDTH FIX END */
 
 </style>
 <?php endif; ?>
@@ -9326,66 +10667,135 @@ document.addEventListener('DOMContentLoaded', function(){
 
 
 <script>
+/* SPIDERCMS MOBILE LAYOUT WIDTH FIX START */
+(function(){
+    function ready(fn){
+        if(document.readyState !== 'loading') fn();
+        else document.addEventListener('DOMContentLoaded', fn);
+    }
 
+    ready(function(){
+        if(document.querySelector('.live-shell')) return;
+
+        // Jeżeli istnieje już hamburger z wcześniejszego panelu, używamy go.
+        var btn = document.querySelector('.mobile-menu-toggle, .spidercms-mobile-toggle, .spider-mobile-menu-btn, #spidercmsMobileSidebarBtn, #spidercmsMobileBtn');
+        var sidebar = document.querySelector('.sidebar, aside.sidebar, .admin-sidebar, .side-menu');
+        if(!sidebar) return;
+
+        // Jeśli nie ma hamburgera, tworzymy minimalny.
+        if(!btn){
+            btn = document.createElement('button');
+            btn.type = 'button';
+            btn.className = 'mobile-menu-toggle';
+            btn.setAttribute('aria-label','Otwórz menu');
+            btn.textContent = '☰';
+            btn.style.cssText = 'display:none;position:fixed;top:14px;left:14px;width:44px;height:44px;border:0;border-radius:14px;background:linear-gradient(135deg,#a855f7,#2563eb);color:#fff;font-size:24px;font-weight:900;z-index:100000;align-items:center;justify-content:center;';
+            document.body.appendChild(btn);
+
+            var st = document.createElement('style');
+            st.textContent = '@media(max-width:768px){.mobile-menu-toggle{display:flex!important}}';
+            document.head.appendChild(st);
+        }
+
+        var backdrop = document.querySelector('.mobile-menu-backdrop, .spidercms-mobile-backdrop, .spider-mobile-backdrop');
+        if(!backdrop){
+            backdrop = document.createElement('div');
+            backdrop.className = 'mobile-menu-backdrop';
+            backdrop.style.cssText = 'display:none;position:fixed;inset:0;background:rgba(2,6,23,.65);z-index:99990;';
+            document.body.appendChild(backdrop);
+
+            var bst = document.createElement('style');
+            bst.textContent = '@media(max-width:768px){body.sidebar-open .mobile-menu-backdrop{display:block!important}}';
+            document.head.appendChild(bst);
+        }
+
+        function isOpen(){
+            return document.body.classList.contains('sidebar-open') ||
+                   document.body.classList.contains('spidercms-menu-open') ||
+                   document.body.classList.contains('spider-menu-open') ||
+                   document.body.classList.contains('spidercms-mobile-sidebar-open');
+        }
+
+        function openMenu(){
+            document.body.classList.add('sidebar-open');
+            btn.textContent = '×';
+        }
+
+        function closeMenu(){
+            document.body.classList.remove('sidebar-open','spidercms-menu-open','spider-menu-open','spidercms-mobile-sidebar-open');
+            btn.textContent = '☰';
+        }
+
+        function toggle(e){
+            if(e){
+                e.preventDefault();
+                e.stopPropagation();
+            }
+            if(isOpen()) closeMenu();
+            else openMenu();
+        }
+
+        btn.addEventListener('click', toggle);
+        btn.addEventListener('touchstart', toggle, {passive:false});
+
+        backdrop.addEventListener('click', closeMenu);
+        backdrop.addEventListener('touchstart', function(e){
+            e.preventDefault();
+            closeMenu();
+        }, {passive:false});
+
+        sidebar.querySelectorAll('a').forEach(function(a){
+            a.addEventListener('click', function(){
+                if(window.innerWidth <= 768) closeMenu();
+            });
+        });
+
+        window.addEventListener('resize', function(){
+            if(window.innerWidth > 768) closeMenu();
+        });
+    });
+})();
+/* SPIDERCMS MOBILE LAYOUT WIDTH FIX END */
+</script>
+
+<!-- Emergency users sidebar injection -->
+
+<script>
+document.addEventListener('DOMContentLoaded', function(){
+    var nav = document.querySelector('#sidebar nav') || document.querySelector('aside nav') || document.querySelector('nav');
+    if (!nav || nav.querySelector('a[href*="tab=uzytkownicy"]')) return;
+
+    var a = document.createElement('a');
+    a.href = 'admin.php?tab=uzytkownicy';
+    a.innerHTML = '<i class="fa-solid fa-users-gear"></i> Użytkownicy';
+    a.style.color = '#c084fc';
+
+    try {
+        if (new URLSearchParams(location.search).get('tab') === 'uzytkownicy') {
+            a.classList.add('active');
+        }
+    } catch(e) {}
+
+    var logi = nav.querySelector('a[href*="tab=logi"]');
+    if (logi) nav.insertBefore(a, logi);
+    else nav.appendChild(a);
+});
 </script>
 
 
 
 <script>
-(function(){
-    document.addEventListener('DOMContentLoaded', function(){
-        if (document.querySelector('.live-shell')) return;
+document.addEventListener('DOMContentLoaded', function(){
+    var role = <?= json_encode(spidercms_admin_current_role(), JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) ?>;
+    if (role === 'admin') return;
 
-        const btn = document.getElementById('spidercmsMobileMenuBtn');
-        const backdrop = document.getElementById('spidercmsSidebarBackdrop');
-        const body = document.body;
-
-        function closeMenu(){
-            body.classList.remove('spidercms-sidebar-open');
-            if (btn) btn.setAttribute('aria-expanded','false');
+    document.querySelectorAll('aside nav a, #sidebar nav a, nav a').forEach(function(a){
+        var href = a.getAttribute('href') || '';
+        if (href.indexOf('tab=ustawienia') !== -1 || href.indexOf('settings=security') !== -1 || href.indexOf('settings=social') !== -1) {
+            a.remove();
         }
-
-        function toggleMenu(e){
-            if (e) {
-                e.preventDefault();
-                e.stopPropagation();
-            }
-
-            const open = body.classList.toggle('spidercms-sidebar-open');
-
-            if (btn) {
-                btn.setAttribute('aria-expanded', open ? 'true' : 'false');
-            }
-        }
-
-        if (btn) {
-            btn.addEventListener('click', toggleMenu);
-            btn.addEventListener('touchstart', toggleMenu, {passive:false});
-        }
-
-        if (backdrop) {
-            backdrop.addEventListener('click', closeMenu);
-            backdrop.addEventListener('touchstart', function(e){
-                e.preventDefault();
-                closeMenu();
-            }, {passive:false});
-        }
-
-        document.addEventListener('keydown', function(e){
-            if (e.key === 'Escape') closeMenu();
-        });
-
-        document.querySelectorAll('#sidebar a').forEach(function(a){
-            a.addEventListener('click', function(){
-                if (window.innerWidth <= 1024) closeMenu();
-            });
-        });
-
-        window.addEventListener('resize', function(){
-            if (window.innerWidth > 1024) closeMenu();
-        });
     });
-})();
+});
 </script>
 
 </body>
