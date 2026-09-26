@@ -7,12 +7,378 @@
 // Naprawiono strukturę formularzy (zapis ustawień oraz eksport ZIP działają niezależnie)
 // NAPRAWIONO: Dodano pełną obsługę, formularz oraz dynamiczny szablon generowania stopki z poprawną ścieżką
 // DYNAMICZNA STOPKA: Zapis stopki aktualizuje teraz globalny plik footer.php oraz automatycznie naprawia istniejące podstrony!
-// Dodano: Zmianę hasła administratora z poziomu zakładki Ustawienia
+// Wyłączono: zmianę hasła administratora z poziomu panelu
 // Dodano: Czat użytkownika strony z administratorem, bez bazy danych, zapis w plikach JSON
 // Wersja: czerwiec 2026
 // ======================================================================
 
+// ----------------------------------------------------------------------
+// KONFIGURACJA SESJI
+// ----------------------------------------------------------------------
+// Ustawienia muszą być wykonane przed session_start(), żeby sesja admina
+// oraz sesje odwiedzających działały stabilnie również na hostingu współdzielonym.
+if (session_status() === PHP_SESSION_NONE) {
+    @ini_set('session.use_only_cookies', '1');
+    @ini_set('session.use_strict_mode', '1');
+    @ini_set('session.cookie_httponly', '1');
+    @ini_set('session.cookie_samesite', 'Lax');
+    if (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') {
+        @ini_set('session.cookie_secure', '1');
+    }
+}
 session_start();
+
+
+if (!function_exists('str_contains')) {
+    function str_contains($haystack, $needle) {
+        return $needle === '' || strpos((string)$haystack, (string)$needle) !== false;
+    }
+}
+if (!function_exists('str_starts_with')) {
+    function str_starts_with($haystack, $needle) {
+        return $needle === '' || strncmp((string)$haystack, (string)$needle, strlen((string)$needle)) === 0;
+    }
+}
+if (!function_exists('str_ends_with')) {
+    function str_ends_with($haystack, $needle) {
+        $haystack = (string)$haystack;
+        $needle = (string)$needle;
+        return $needle === '' || substr($haystack, -strlen($needle)) === $needle;
+    }
+}
+
+
+
+// ----------------------------------------------------------------------
+// SPIDERCMS UPDATE CHECKER - DEMO VERSION
+// Model: plik .update pobierany jako surowe bajty i zapisywany jako admin.php
+// ----------------------------------------------------------------------
+if (!defined('SPIDERCMS_VERSION')) {
+    define('SPIDERCMS_VERSION', '1.0.0');
+}
+if (!defined('SPIDERCMS_UPDATE_URL')) {
+    define('SPIDERCMS_UPDATE_URL', 'https://kamilpaprota.pl/update/update_latest.php');
+}
+if (!defined('SPIDERCMS_UPDATE_CACHE_FILE')) {
+    define('SPIDERCMS_UPDATE_CACHE_FILE', (__DIR__ === DIRECTORY_SEPARATOR ? DIRECTORY_SEPARATOR . '.update_cache.json' : rtrim(__DIR__, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . '.update_cache.json'));
+}
+
+function spidercms_update_cache_load() {
+    if (!file_exists(SPIDERCMS_UPDATE_CACHE_FILE)) return null;
+    $data = json_decode((string)@file_get_contents(SPIDERCMS_UPDATE_CACHE_FILE), true);
+    return is_array($data) ? $data : null;
+}
+
+function spidercms_update_cache_save(array $data) {
+    @file_put_contents(
+        SPIDERCMS_UPDATE_CACHE_FILE,
+        json_encode($data, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
+        LOCK_EX
+    );
+    @chmod(SPIDERCMS_UPDATE_CACHE_FILE, 0640);
+}
+
+function spidercms_fetch_url($url, $timeout = 5) {
+    $url = trim((string)$url);
+    if ($url === '' || !preg_match('~^https?://~i', $url)) return false;
+
+    if (function_exists('curl_init')) {
+        $ch = curl_init($url);
+        curl_setopt_array($ch, [
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_FOLLOWLOCATION => true,
+            CURLOPT_CONNECTTIMEOUT => $timeout,
+            CURLOPT_TIMEOUT => $timeout,
+            CURLOPT_SSL_VERIFYPEER => true,
+            CURLOPT_USERAGENT => 'SpiderCMS-DEMO/' . SPIDERCMS_VERSION,
+        ]);
+        $body = curl_exec($ch);
+        $code = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        curl_close($ch);
+        return ($code >= 200 && $code < 300 && is_string($body)) ? $body : false;
+    }
+
+    $ctx = stream_context_create([
+        'http' => [
+            'timeout' => $timeout,
+            'header' => "User-Agent: SpiderCMS-DEMO/" . SPIDERCMS_VERSION . "\r\n",
+        ],
+        'ssl' => [
+            'verify_peer' => true,
+            'verify_peer_name' => true,
+        ],
+    ]);
+
+    return @file_get_contents($url, false, $ctx);
+}
+
+function spidercms_check_update($force = false) {
+    $cache_ttl = 6 * 60 * 60;
+    $cached = spidercms_update_cache_load();
+
+    if (!$force && is_array($cached) && (int)($cached['checked_at'] ?? 0) > time() - $cache_ttl) {
+        $data = $cached['data'] ?? null;
+    } else {
+        $json = spidercms_fetch_url(SPIDERCMS_UPDATE_URL, 5);
+        if ($json === false || trim($json) === '') {
+            return is_array($cached['data'] ?? null) ? $cached['data'] : null;
+        }
+
+        $data = json_decode($json, true);
+        if (!is_array($data)) return null;
+
+        spidercms_update_cache_save([
+            'checked_at' => time(),
+            'checked_at_text' => date('Y-m-d H:i:s'),
+            'data' => $data,
+        ]);
+    }
+
+    if (!is_array($data)) return null;
+
+    $latest = trim((string)($data['latest_version'] ?? ''));
+    if ($latest !== '' && version_compare($latest, SPIDERCMS_VERSION, '>')) {
+        return $data;
+    }
+
+    return null;
+}
+
+function spidercms_update_admin_filename() {
+    return basename($_SERVER['SCRIPT_NAME'] ?? 'admin.php');
+}
+
+function spidercms_update_current_admin_path() {
+    return __DIR__ . '/' . spidercms_update_admin_filename();
+}
+
+function spidercms_update_backups_dir() {
+    $dir = __DIR__ . '/.updates/backups';
+    if (!is_dir($dir)) {
+        @mkdir($dir, 0750, true);
+    }
+    if (function_exists('spidercms_write_htaccess')) {
+        spidercms_write_htaccess(dirname($dir), "Options -Indexes\nRequire all denied\nDeny from all\n");
+        spidercms_write_htaccess($dir, "Options -Indexes\nRequire all denied\nDeny from all\n");
+    }
+    return $dir;
+}
+
+function spidercms_update_download_latest_file(array $update) {
+    $url = trim((string)($update['download_url'] ?? $update['file_url'] ?? ''));
+    if ($url === '' || !preg_match('~^https://~i', $url)) {
+        return ['ok'=>false, 'msg'=>'Brak prawidłowego adresu HTTPS pliku aktualizacji.'];
+    }
+
+    $body = spidercms_fetch_url($url, 20);
+    if ($body === false || !is_string($body) || strlen($body) < 10) {
+        return ['ok'=>false, 'msg'=>'Nie udało się pobrać pliku aktualizacji.'];
+    }
+
+    $expected_sha = strtolower(trim((string)($update['sha256'] ?? '')));
+    if ($expected_sha !== '') {
+        $real_sha = hash('sha256', $body);
+        if (!hash_equals($expected_sha, $real_sha)) {
+            return [
+                'ok'=>false,
+                'msg'=>'Suma kontrolna SHA256 nie zgadza się. Aktualizacja przerwana. Oczekiwano: ' . $expected_sha . ', pobrano: ' . $real_sha
+            ];
+        }
+    }
+
+    return ['ok'=>true, 'content'=>$body];
+}
+
+function spidercms_update_php_syntax_check($file) {
+    if (!is_file($file)) {
+        return ['ok'=>false, 'msg'=>'Nie znaleziono pliku testowego aktualizacji.'];
+    }
+
+    $head = file_get_contents($file, false, null, 0, 4096);
+    if (!is_string($head) || strpos($head, '<?php') === false || stripos($head, 'SpiderCMS') === false) {
+        return ['ok'=>false, 'msg'=>'Pobrany plik nie wygląda jak poprawny admin.php SpiderCMS.'];
+    }
+
+    $candidates = [];
+    if (defined('PHP_BINARY') && is_string(PHP_BINARY) && trim(PHP_BINARY) !== '') {
+        $candidates[] = PHP_BINARY;
+    }
+    if (defined('PHP_BINDIR') && is_string(PHP_BINDIR) && trim(PHP_BINDIR) !== '') {
+        $candidates[] = rtrim(PHP_BINDIR, '/\\') . DIRECTORY_SEPARATOR . 'php';
+    }
+    $candidates[] = '/usr/bin/php';
+    $candidates[] = '/usr/local/bin/php';
+    $candidates[] = 'php';
+
+    $php_binary = '';
+    foreach ($candidates as $candidate) {
+        $candidate = trim((string)$candidate);
+        if ($candidate === '') continue;
+        if ($candidate === 'php' || is_file($candidate) || is_executable($candidate)) {
+            $php_binary = $candidate;
+            break;
+        }
+    }
+
+    if ($php_binary === '' || !function_exists('shell_exec') || !is_callable('shell_exec')) {
+        return ['ok'=>true, 'msg'=>'php -l niedostępne; wykonano tylko kontrolę podstawową pliku.'];
+    }
+
+    $cmd = escapeshellarg($php_binary) . ' -l ' . escapeshellarg($file) . ' 2>&1';
+    $output = @shell_exec($cmd);
+    $output = trim((string)$output);
+
+    if ($output !== '' && stripos($output, 'No syntax errors detected') !== false) {
+        return ['ok'=>true, 'msg'=>$output];
+    }
+
+    if ($output === '' || stripos($output, 'command not found') !== false || stripos($output, 'not found') !== false) {
+        return ['ok'=>true, 'msg'=>'php -l niedostępne na tym hostingu; wykonano tylko kontrolę podstawową pliku.'];
+    }
+
+    return ['ok'=>false, 'msg'=>'Test składni PHP nie przeszedł: ' . $output];
+}
+
+function spidercms_install_online_update(array $update) {
+    $latest = trim((string)($update['latest_version'] ?? ''));
+    if ($latest === '' || version_compare($latest, SPIDERCMS_VERSION, '<=')) {
+        return ['ok'=>false, 'msg'=>'Brak nowszej wersji do instalacji.'];
+    }
+
+    $current = spidercms_update_current_admin_path();
+    if (!is_file($current)) {
+        return ['ok'=>false, 'msg'=>'Nie znaleziono aktualnego pliku admin.php.'];
+    }
+
+    if (!is_readable($current) || !is_writable($current)) {
+        return ['ok'=>false, 'msg'=>'Plik admin.php nie ma wymaganych praw odczytu/zapisu.'];
+    }
+
+    $download = spidercms_update_download_latest_file($update);
+    if (empty($download['ok'])) {
+        return $download;
+    }
+
+    $test_file = __DIR__ . '/admin_update_test_' . bin2hex(random_bytes(4)) . '.php';
+    $bytes = @file_put_contents($test_file, $download['content'], LOCK_EX);
+
+    if ($bytes === false || $bytes !== strlen($download['content'])) {
+        @unlink($test_file);
+        return ['ok'=>false, 'msg'=>'Nie udało się zapisać pełnego pliku testowego aktualizacji.'];
+    }
+    @chmod($test_file, 0644);
+
+    if (hash('sha256', $download['content']) !== hash_file('sha256', $test_file)) {
+        @unlink($test_file);
+        return ['ok'=>false, 'msg'=>'Plik zapisany na serwerze różni się od pobranego pliku. Aktualizacja przerwana.'];
+    }
+
+    $syntax = spidercms_update_php_syntax_check($test_file);
+    if (empty($syntax['ok'])) {
+        @unlink($test_file);
+        return ['ok'=>false, 'msg'=>'Aktualizacja przerwana. Nowy plik ma błąd albo nie przeszedł testu: ' . ($syntax['msg'] ?? '')];
+    }
+
+    $backup_dir = spidercms_update_backups_dir();
+    $backup = $backup_dir . '/' . basename($current) . '.backup_' . date('Ymd_His') . '_v' . preg_replace('/[^0-9A-Za-z._-]/', '_', SPIDERCMS_VERSION);
+
+    if (!@copy($current, $backup)) {
+        @unlink($test_file);
+        return ['ok'=>false, 'msg'=>'Nie udało się wykonać backupu aktualnego admin.php.'];
+    }
+    @chmod($backup, 0640);
+
+    if (!@rename($test_file, $current)) {
+        @unlink($test_file);
+        return ['ok'=>false, 'msg'=>'Nie udało się podmienić admin.php. Backup został wykonany.'];
+    }
+
+    @file_put_contents(__DIR__ . '/.updates/last_update.json', json_encode([
+        'updated_at' => date('Y-m-d H:i:s'),
+        'from' => SPIDERCMS_VERSION,
+        'to' => $latest,
+        'backup' => $backup,
+        'source' => $update['download_url'] ?? $update['file_url'] ?? '',
+        'syntax_check' => $syntax['msg'] ?? '',
+        'mode' => 'demo_direct_update_file_replace'
+    ], JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES), LOCK_EX);
+
+    return ['ok'=>true, 'msg'=>'Aktualizacja DEMO zakończona. Pobrano plik .update, wykonano backup i podmieniono admin.php.', 'backup'=>$backup];
+}
+
+function spidercms_update_forced_result_html() {
+    if (!isset($_GET['force_update_check']) || $_GET['force_update_check'] !== '1') return '';
+
+    $update = spidercms_check_update(true);
+    if (is_array($update)) return '';
+
+    ob_start();
+    ?>
+    <div class="card" style="border:1px solid rgba(34,197,94,.35);background:rgba(34,197,94,.08);margin-bottom:1rem;">
+        <h3 style="margin-bottom:.4rem;color:#bbf7d0;">
+            <i class="fa-solid fa-circle-check"></i> Brak nowych aktualizacji
+        </h3>
+        <p style="color:#cbd5e1;margin:0;">
+            Sprawdzono serwer aktualizacji. Aktualna wersja SpiderCMS DEMO: <strong><?= e(SPIDERCMS_VERSION) ?></strong>.
+        </p>
+    </div>
+    <?php
+    return ob_get_clean();
+}
+
+function spidercms_update_notice_html() {
+    $update = spidercms_check_update(isset($_GET['force_update_check']) && $_GET['force_update_check'] === '1');
+    if (!is_array($update)) return '';
+
+    $latest = e($update['latest_version'] ?? '');
+    $download = trim((string)($update['download_url'] ?? ''));
+    $required = !empty($update['required']);
+
+    ob_start();
+    ?>
+    <div class="card spider-update-notice-global" style="border:1px solid rgba(250,204,21,.45);background:linear-gradient(135deg,rgba(250,204,21,.12),rgba(168,85,247,.10));margin-bottom:1.25rem;">
+        <h2 style="margin-bottom:.6rem;color:#fde68a;">
+            <i class="fa-solid fa-arrows-rotate"></i>
+            Dostępna aktualizacja SpiderCMS DEMO <?= $latest ?>
+        </h2>
+        <p style="color:#e5e7eb;margin-bottom:.8rem;">
+            Aktualna wersja: <strong><?= e(SPIDERCMS_VERSION) ?></strong>.
+            <?= $required ? '<strong style="color:#fca5a5;">Ta aktualizacja jest oznaczona jako wymagana.</strong>' : 'Możesz zaktualizować wersję DEMO automatycznie albo pobrać plik ręcznie.' ?>
+        </p>
+
+        <?php if (!empty($update['changelog']) && is_array($update['changelog'])): ?>
+            <ul style="margin:.75rem 0 1rem 1.2rem;color:#cbd5e1;line-height:1.6;">
+                <?php foreach ($update['changelog'] as $item): ?>
+                    <li><?= e($item) ?></li>
+                <?php endforeach; ?>
+            </ul>
+        <?php endif; ?>
+
+        <div style="display:flex;gap:.75rem;flex-wrap:wrap;align-items:center;">
+            <?php if ($download !== '' && preg_match('~^https?://~i', $download)): ?>
+                <form method="post" style="display:inline;" onsubmit="return confirm('Wykonać backup obecnego admin.php DEMO i zainstalować aktualizację <?= $latest ?>?');">
+                    <?= csrf_field() ?>
+                    <input type="hidden" name="action" value="install_online_update">
+                    <button type="submit" class="btn btn-edit">
+                        <i class="fa-solid fa-cloud-arrow-down"></i> Zainstaluj aktualizację
+                    </button>
+                </form>
+                <a href="<?= e($download) ?>" target="_blank" rel="noopener noreferrer" class="btn btn-view">
+                    <i class="fa-solid fa-download"></i> Pobierz ręcznie
+                </a>
+            <?php endif; ?>
+            <a href="admin.php?tab=ustawienia&force_update_check=1" class="btn btn-view">
+                <i class="fa-solid fa-rotate"></i> Sprawdź ponownie
+            </a>
+            <button type="button" class="btn btn-view" onclick="spidercmsPostponeUpdate()">
+                <i class="fa-solid fa-clock"></i> Później
+            </button>
+        </div>
+    </div>
+    <?php
+    return ob_get_clean();
+}
+
 
 
 // ----------------------------------------------------------------------
@@ -65,6 +431,1007 @@ function spidercms_write_htaccess($dir, $content) {
 
 
 // ----------------------------------------------------------------------
+// SPIDERCMS THEMES / SKÓRKI
+// Bezpieczny system skórek: ZIP = theme.json + style.css + preview.png + assets/
+// ----------------------------------------------------------------------
+if (!defined('SPIDERCMS_THEMES_DIR')) define('SPIDERCMS_THEMES_DIR', __DIR__ . '/themes');
+if (!defined('SPIDERCMS_ACTIVE_THEME_FILE')) define('SPIDERCMS_ACTIVE_THEME_FILE', __DIR__ . '/.active_theme.json');
+
+function spidercms_theme_slug($name) {
+    $name = strtolower(trim((string)$name));
+    $map = ['ą'=>'a','ć'=>'c','ę'=>'e','ł'=>'l','ń'=>'n','ó'=>'o','ś'=>'s','ż'=>'z','ź'=>'z'];
+    $name = strtr($name, $map);
+    $name = preg_replace('/[^a-z0-9_-]+/i', '-', $name);
+    $name = trim($name, '-_');
+    return $name !== '' ? substr($name, 0, 80) : 'theme-' . date('YmdHis');
+}
+
+function spidercms_themes_bootstrap() {
+    if (!is_dir(SPIDERCMS_THEMES_DIR)) @mkdir(SPIDERCMS_THEMES_DIR, 0755, true);
+    $ht = "Options -Indexes\nRemoveHandler .php .php3 .php4 .php5 .php7 .php8 .phtml .phar .cgi .pl .py .sh\nRemoveType .php .php3 .php4 .php5 .php7 .php8 .phtml .phar .cgi .pl .py .sh\n<FilesMatch \"\\.(php|php[0-9]?|phtml|phar|cgi|pl|py|sh|bash|exe|dll|bat|cmd)$\">\nRequire all denied\nDeny from all\n</FilesMatch>\n<IfModule mod_php.c>\nphp_flag engine off\n</IfModule>\n";
+    @file_put_contents(SPIDERCMS_THEMES_DIR . '/.htaccess', $ht, LOCK_EX);
+}
+
+function spidercms_theme_safe_path($path) {
+    $path = str_replace('\\', '/', (string)$path);
+    if ($path === '' || str_starts_with($path, '/') || str_contains($path, '..')) return false;
+    if (preg_match('~(^|/)\.~', $path)) return false;
+    if (preg_match('~\.(php|php[0-9]?|phtml|phar|cgi|pl|py|sh|bash|exe|dll|bat|cmd|com|scr|htaccess)$~i', $path)) return false;
+    return true;
+}
+
+function spidercms_theme_read_manifest($dir) {
+    $file = rtrim((string)$dir, '/\\') . '/theme.json';
+    if (!is_file($file)) return null;
+    $data = json_decode((string)@file_get_contents($file), true);
+    if (!is_array($data)) return null;
+    $data['name'] = trim((string)($data['name'] ?? basename((string)$dir))) ?: basename((string)$dir);
+    $data['css'] = spidercms_theme_safe_path($data['css'] ?? 'style.css') ? ($data['css'] ?? 'style.css') : 'style.css';
+    $data['preview'] = (!empty($data['preview']) && spidercms_theme_safe_path($data['preview'])) ? $data['preview'] : '';
+    return $data;
+}
+
+function spidercms_theme_active_slug() {
+    if (!is_file(SPIDERCMS_ACTIVE_THEME_FILE)) return '';
+    $data = json_decode((string)@file_get_contents(SPIDERCMS_ACTIVE_THEME_FILE), true);
+    return is_array($data) ? spidercms_theme_slug($data['theme'] ?? '') : '';
+}
+
+function spidercms_theme_loader_code() {
+    return <<<'PHP'
+<?php
+// SpiderCMS active theme loader - PHP 7 compatible
+$spidercmsThemeRoot = __DIR__;
+for ($i = 0; $i < 5; $i++) {
+    if (is_file($spidercmsThemeRoot . '/.active_theme.json') && is_dir($spidercmsThemeRoot . '/themes')) {
+        break;
+    }
+    $parent = dirname($spidercmsThemeRoot);
+    if ($parent === $spidercmsThemeRoot) {
+        break;
+    }
+    $spidercmsThemeRoot = $parent;
+}
+
+$spidercmsActiveThemeFile = $spidercmsThemeRoot . '/.active_theme.json';
+$spidercmsThemeBaseDir = $spidercmsThemeRoot . '/themes';
+
+if (is_file($spidercmsActiveThemeFile) && is_dir($spidercmsThemeBaseDir)) {
+    $spidercmsActiveTheme = json_decode((string)@file_get_contents($spidercmsActiveThemeFile), true);
+    $spidercmsThemeSlug = preg_replace('/[^a-zA-Z0-9_-]/', '', (string)($spidercmsActiveTheme['theme'] ?? ''));
+    $spidercmsThemeCss = trim((string)($spidercmsActiveTheme['css'] ?? 'style.css'));
+    $spidercmsThemeCss = str_replace('\\', '/', $spidercmsThemeCss);
+
+    if (
+        $spidercmsThemeSlug !== '' &&
+        $spidercmsThemeCss !== '' &&
+        strpos($spidercmsThemeCss, '..') === false &&
+        is_file($spidercmsThemeBaseDir . '/' . $spidercmsThemeSlug . '/' . $spidercmsThemeCss)
+    ) {
+        $spidercmsThemeHref = 'themes/' . rawurlencode($spidercmsThemeSlug) . '/' . str_replace('%2F', '/', rawurlencode($spidercmsThemeCss));
+        if (__DIR__ !== $spidercmsThemeRoot) {
+            $spidercmsThemeHref = '../' . $spidercmsThemeHref;
+        }
+        echo '<link rel="stylesheet" href="' . htmlspecialchars($spidercmsThemeHref, ENT_QUOTES, 'UTF-8') . '?v=' . filemtime($spidercmsThemeBaseDir . '/' . $spidercmsThemeSlug . '/' . $spidercmsThemeCss) . '">' . "\n";
+    }
+}
+?>
+PHP;
+}
+
+function spidercms_theme_inject_loader($content) {
+    $content = preg_replace('~<!-- SpiderCMS Active Theme START -->.*?<!-- SpiderCMS Active Theme END -->\s*~s', '', (string)$content);
+    $block = "<!-- SpiderCMS Active Theme START -->\n" . spidercms_theme_loader_code() . "\n<!-- SpiderCMS Active Theme END -->\n";
+    if (stripos($content, '</head>') !== false) return preg_replace('~</head>~i', $block . '</head>', $content, 1);
+    return $block . $content;
+}
+
+function spidercms_theme_page_files() {
+    $files = [];
+    if (defined('ACTIVE_PAGES_DIR')) foreach (glob(ACTIVE_PAGES_DIR . '/*.php') ?: [] as $f) $files[] = $f;
+    if (function_exists('spidercms_available_page_folders') && function_exists('spidercms_page_folder_dir')) {
+        foreach (spidercms_available_page_folders() as $folder) foreach (glob(spidercms_page_folder_dir($folder) . '/*.php') ?: [] as $f) $files[] = $f;
+    } else {
+        foreach (glob(__DIR__ . '/pages/*.php') ?: [] as $f) $files[] = $f;
+    }
+    if (is_file(__DIR__ . '/index.php')) $files[] = __DIR__ . '/index.php';
+    return array_values(array_unique($files));
+}
+
+function spidercms_theme_sync_loader_to_pages() {
+    $updated = 0;
+    foreach (spidercms_theme_page_files() as $file) {
+        if (!is_file($file) || basename($file) === basename($_SERVER['SCRIPT_NAME'] ?? 'admin.php')) continue;
+        $old = (string)@file_get_contents($file);
+        if ($old === '') continue;
+        $new = spidercms_theme_inject_loader($old);
+        if ($new !== $old) {
+            @file_put_contents($file, $new, LOCK_EX);
+            $updated++;
+        }
+    }
+    return $updated;
+}
+
+
+function spidercms_theme_assets_dir() {
+    $dir = __DIR__ . '/assets';
+    if (!is_dir($dir)) {
+        @mkdir($dir, 0755, true);
+    }
+    return $dir;
+}
+
+function spidercms_theme_active_css_file() {
+    return spidercms_theme_assets_dir() . '/spidercms-active-theme.css';
+}
+
+function spidercms_theme_apply_css_only($slug) {
+    $slug = spidercms_theme_slug($slug);
+    $dir = SPIDERCMS_THEMES_DIR . '/' . $slug;
+    $manifest = spidercms_theme_read_manifest($dir);
+
+    if (!$manifest) {
+        return false;
+    }
+
+    $cssRel = $manifest['css'] ?? 'style.css';
+    $cssFile = $dir . '/' . $cssRel;
+
+    if (!is_file($cssFile)) {
+        return false;
+    }
+
+    $css = (string)@file_get_contents($cssFile);
+    if ($css === '') {
+        return false;
+    }
+
+    spidercms_theme_assets_dir();
+
+    // Popraw względne url(...) w CSS motywu, bo finalnie CSS będzie w /assets/spidercms-theme.css.
+    $relativeAssetsPath = '../themes/' . $slug . '/';
+    $css = preg_replace_callback('~url\((["\']?)(?!https?:|data:|/)([^)\'"]+)\1\)~i', function($m) use ($relativeAssetsPath) {
+        $url = trim($m[2]);
+        return 'url("' . $relativeAssetsPath . str_replace('"', '%22', $url) . '")';
+    }, $css);
+
+    $global = spidercms_theme_assets_dir() . '/spidercms-theme.css';
+    $current = is_file($global) ? (string)@file_get_contents($global) : '';
+
+    // Usuń poprzednio aktywowany motyw i stary import, jeżeli był.
+    $current = preg_replace(
+        '~\/\* SPIDERCMS ACTIVE THEME START \*\/.*?\/\* SPIDERCMS ACTIVE THEME END \*\/\s*~s',
+        '',
+        $current
+    );
+    $current = preg_replace('~\/\* SpiderCMS Active Theme CSS \*\/\s*@import url\([^)]+spidercms-active-theme\.css[^)]*\);\s*~i', '', $current);
+
+    $block = "\n\n/* SPIDERCMS ACTIVE THEME START */\n";
+    $block .= "/* Theme: " . $slug . " | activated: " . date('Y-m-d H:i:s') . " */\n";
+    $block .= $css . "\n";
+    $block .= "/* SPIDERCMS ACTIVE THEME END */\n";
+
+    if (@file_put_contents($global, rtrim($current) . $block, LOCK_EX) === false) {
+        return false;
+    }
+    @chmod($global, 0644);
+
+    // Zostawiamy też kopię aktywnego CSS do diagnostyki.
+    @file_put_contents(spidercms_theme_active_css_file(), "/* SpiderCMS active theme: {$slug} */\n" . $css, LOCK_EX);
+    @chmod(spidercms_theme_active_css_file(), 0644);
+
+    @file_put_contents(
+        SPIDERCMS_ACTIVE_THEME_FILE,
+        json_encode([
+            'theme' => $slug,
+            'css' => $cssRel,
+            'activated_at' => date('Y-m-d H:i:s'),
+            'mode' => 'merged_into_spidercms_theme_css',
+            'global_css' => 'assets/spidercms-theme.css'
+        ], JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
+        LOCK_EX
+    );
+    @chmod(SPIDERCMS_ACTIVE_THEME_FILE, 0640);
+
+    // Usuń ewentualny stary PHP-loader, który wcześniej powodował 500.
+    if (function_exists('spidercms_theme_remove_loader_from_pages')) {
+        spidercms_theme_remove_loader_from_pages();
+    }
+
+    return true;
+}
+
+function spidercms_theme_ensure_global_css_import() {
+    // Od wersji CSS-only-fix motyw jest dopisywany bezpośrednio do /assets/spidercms-theme.css.
+    return true;
+}
+
+function spidercms_theme_set_active($slug) {
+    $slug = spidercms_theme_slug($slug);
+
+    if (!spidercms_theme_apply_css_only($slug)) {
+        return false;
+    }
+
+    spidercms_theme_ensure_global_css_import();
+
+    return true;
+}
+
+function spidercms_theme_delete_dir($dir) {
+    $dir = rtrim((string)$dir, '/\\');
+    if ($dir === '' || !is_dir($dir) || !str_starts_with((string)realpath($dir), (string)realpath(SPIDERCMS_THEMES_DIR))) return false;
+    $it = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($dir, FilesystemIterator::SKIP_DOTS), RecursiveIteratorIterator::CHILD_FIRST);
+    foreach ($it as $item) $item->isDir() ? @rmdir($item->getPathname()) : @unlink($item->getPathname());
+    return @rmdir($dir);
+}
+
+function spidercms_theme_installed() {
+    spidercms_themes_bootstrap();
+    $themes = [];
+    foreach (glob(SPIDERCMS_THEMES_DIR . '/*', GLOB_ONLYDIR) ?: [] as $dir) {
+        $slug = basename($dir);
+        $m = spidercms_theme_read_manifest($dir);
+        if (!$m) continue;
+        $themes[$slug] = ['slug'=>$slug,'dir'=>$dir,'name'=>$m['name'] ?? $slug,'version'=>$m['version'] ?? '','author'=>$m['author'] ?? '','description'=>$m['description'] ?? '','css'=>$m['css'] ?? 'style.css','preview'=>$m['preview'] ?? ''];
+    }
+    ksort($themes);
+    return $themes;
+}
+
+function spidercms_theme_install_zip($uploaded) {
+    spidercms_themes_bootstrap();
+    if (!class_exists('ZipArchive')) return ['ok'=>false,'msg'=>'Serwer nie ma rozszerzenia ZipArchive.'];
+    if (empty($uploaded) || ($uploaded['error'] ?? UPLOAD_ERR_NO_FILE) !== UPLOAD_ERR_OK) return ['ok'=>false,'msg'=>'Nie przesłano poprawnego pliku ZIP.'];
+    if (strtolower(pathinfo((string)($uploaded['name'] ?? ''), PATHINFO_EXTENSION)) !== 'zip') return ['ok'=>false,'msg'=>'Motyw musi być plikiem ZIP.'];
+
+    $zip = new ZipArchive();
+    if ($zip->open($uploaded['tmp_name']) !== true) return ['ok'=>false,'msg'=>'Nie można otworzyć pliku ZIP.'];
+
+    $manifestRaw = null; $basePrefix = '';
+    for ($i=0; $i<$zip->numFiles; $i++) {
+        $name = trim(str_replace('\\', '/', $zip->getNameIndex($i)), '/');
+        if ($name === 'theme.json' || preg_match('~^[^/]+/theme\.json$~', $name)) {
+            $manifestRaw = $zip->getFromIndex($i);
+            $basePrefix = $name === 'theme.json' ? '' : substr($name, 0, strpos($name, '/') + 1);
+            break;
+        }
+    }
+    if ($manifestRaw === null) { $zip->close(); return ['ok'=>false,'msg'=>'Brak pliku theme.json w ZIP.']; }
+
+    $manifest = json_decode((string)$manifestRaw, true);
+    if (!is_array($manifest)) { $zip->close(); return ['ok'=>false,'msg'=>'Nieprawidłowy theme.json.']; }
+
+    $slug = spidercms_theme_slug($manifest['slug'] ?? $manifest['name'] ?? pathinfo((string)$uploaded['name'], PATHINFO_FILENAME));
+    $target = SPIDERCMS_THEMES_DIR . '/' . $slug;
+    if (is_dir($target)) { $slug .= '-' . date('YmdHis'); $target = SPIDERCMS_THEMES_DIR . '/' . $slug; }
+    @mkdir($target, 0755, true);
+
+    $count = 0; $total = 0;
+    for ($i=0; $i<$zip->numFiles; $i++) {
+        $stat = $zip->statIndex($i);
+        $name = trim(str_replace('\\', '/', $zip->getNameIndex($i)), '/');
+        if ($basePrefix !== '' && str_starts_with($name, trim($basePrefix, '/'))) $rel = ltrim(substr($name, strlen(trim($basePrefix, '/'))), '/'); else $rel = $name;
+        if ($rel === '' || str_ends_with($name, '/')) continue;
+        if (!spidercms_theme_safe_path($rel)) { $zip->close(); spidercms_theme_delete_dir($target); return ['ok'=>false,'msg'=>'Motyw zawiera niedozwolony plik: ' . $rel]; }
+        $count++; $total += (int)($stat['size'] ?? 0);
+        if ($count > 350 || $total > 20*1024*1024) { $zip->close(); spidercms_theme_delete_dir($target); return ['ok'=>false,'msg'=>'Paczka motywu jest zbyt duża.']; }
+        $dest = $target . '/' . $rel;
+        if (!is_dir(dirname($dest))) @mkdir(dirname($dest), 0755, true);
+        $content = $zip->getFromIndex($i);
+        if ($content !== false) @file_put_contents($dest, $content, LOCK_EX);
+    }
+    $zip->close();
+
+    $manifest['slug'] = $slug;
+    $manifest['css'] = $manifest['css'] ?? 'style.css';
+    $manifest['preview'] = $manifest['preview'] ?? 'preview.png';
+    @file_put_contents($target . '/theme.json', json_encode($manifest, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES), LOCK_EX);
+
+    $m = spidercms_theme_read_manifest($target);
+    if (!$m || !is_file($target . '/' . ($m['css'] ?? 'style.css'))) {
+        spidercms_theme_delete_dir($target);
+        return ['ok'=>false,'msg'=>'Motyw musi zawierać style.css albo poprawny plik CSS wskazany w theme.json.'];
+    }
+    return ['ok'=>true,'msg'=>'Motyw został zainstalowany.','slug'=>$slug];
+}
+
+
+function spidercms_theme_remove_loader_from_pages() {
+    $updated = 0;
+
+    foreach (spidercms_theme_page_files() as $file) {
+        if (!is_file($file) || basename($file) === basename($_SERVER['SCRIPT_NAME'] ?? 'admin.php')) {
+            continue;
+        }
+
+        $old = (string)@file_get_contents($file);
+        if ($old === '') continue;
+
+        $new = preg_replace(
+            '~<!-- SpiderCMS Active Theme START -->.*?<!-- SpiderCMS Active Theme END -->\s*~s',
+            '',
+            $old
+        );
+
+        if ($new !== $old) {
+            @file_put_contents($file, $new, LOCK_EX);
+            $updated++;
+        }
+    }
+
+    return $updated;
+}
+
+function spidercms_theme_deactivate() {
+    if (is_file(SPIDERCMS_ACTIVE_THEME_FILE)) {
+        @unlink(SPIDERCMS_ACTIVE_THEME_FILE);
+    }
+
+    if (function_exists('spidercms_theme_active_css_file') && is_file(spidercms_theme_active_css_file())) {
+        @unlink(spidercms_theme_active_css_file());
+    }
+
+    if (function_exists('spidercms_theme_assets_dir')) {
+        $global = spidercms_theme_assets_dir() . '/spidercms-theme.css';
+        if (is_file($global)) {
+            $current = (string)@file_get_contents($global);
+            $current = preg_replace(
+                '~\/\* SPIDERCMS ACTIVE THEME START \*\/.*?\/\* SPIDERCMS ACTIVE THEME END \*\/\s*~s',
+                '',
+                $current
+            );
+            $current = preg_replace('~\/\* SpiderCMS Active Theme CSS \*\/\s*@import url\([^)]+spidercms-active-theme\.css[^)]*\);\s*~i', '', $current);
+            @file_put_contents($global, rtrim($current) . "\n", LOCK_EX);
+        }
+    }
+
+    return spidercms_theme_remove_loader_from_pages();
+}
+
+
+
+// ----------------------------------------------------------------------
+// SESJE UŻYTKOWNIKÓW STRONY – trwałe ID odwiedzającego
+// ----------------------------------------------------------------------
+// Ten mechanizm nie tworzy kont i nie wymaga logowania. Nadaje odwiedzającemu
+// stabilny identyfikator zapisany w ciasteczku, dzięki czemu czat i inne moduły
+// mogą rozpoznać tę samą osobę po odświeżeniu strony lub ponownym wejściu.
+define('SPIDERCMS_USER_SESSIONS_DIR', __DIR__ . '/.users');
+define('SPIDERCMS_USER_SESSIONS_FILE', SPIDERCMS_USER_SESSIONS_DIR . '/sessions.json');
+define('SPIDERCMS_USER_SESSION_COOKIE', 'spidercms_user_session');
+
+function spidercms_user_sessions_bootstrap() {
+    if (!is_dir(SPIDERCMS_USER_SESSIONS_DIR)) {
+        @mkdir(SPIDERCMS_USER_SESSIONS_DIR, 0750, true);
+    }
+    spidercms_write_htaccess(SPIDERCMS_USER_SESSIONS_DIR, "Options -Indexes
+Require all denied
+Deny from all
+");
+    if (!file_exists(SPIDERCMS_USER_SESSIONS_FILE)) {
+        @file_put_contents(SPIDERCMS_USER_SESSIONS_FILE, json_encode([], JSON_PRETTY_PRINT), LOCK_EX);
+        @chmod(SPIDERCMS_USER_SESSIONS_FILE, 0640);
+    }
+}
+
+function spidercms_valid_user_session_id($id) {
+    return is_string($id) && preg_match('/^usr_[0-9]{14}_[a-f0-9]{16}$/', $id);
+}
+
+function spidercms_load_user_sessions() {
+    spidercms_user_sessions_bootstrap();
+    $data = json_decode((string)@file_get_contents(SPIDERCMS_USER_SESSIONS_FILE), true);
+    return is_array($data) ? $data : [];
+}
+
+function spidercms_save_user_sessions(array $data) {
+    spidercms_user_sessions_bootstrap();
+    $cutoff = time() - (366 * 24 * 60 * 60);
+    foreach ($data as $id => $row) {
+        if ((int)($row['last_seen_ts'] ?? 0) < $cutoff) unset($data[$id]);
+    }
+    $json = json_encode($data, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    if ($json === false) return false;
+    $ok = @file_put_contents(SPIDERCMS_USER_SESSIONS_FILE, $json, LOCK_EX) !== false;
+    @chmod(SPIDERCMS_USER_SESSIONS_FILE, 0640);
+    return $ok;
+}
+
+function spidercms_set_user_session_cookie($id) {
+    if (!spidercms_valid_user_session_id($id) || headers_sent()) return;
+    $secure = !empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off';
+    setcookie(SPIDERCMS_USER_SESSION_COOKIE, $id, [
+        'expires' => time() + (365 * 24 * 60 * 60),
+        'path' => '/',
+        'secure' => $secure,
+        'httponly' => true,
+        'samesite' => 'Lax',
+    ]);
+    $_COOKIE[SPIDERCMS_USER_SESSION_COOKIE] = $id;
+}
+
+function spidercms_get_or_create_user_session($name = '', $email = '') {
+    $sessions = spidercms_load_user_sessions();
+    $id = $_COOKIE[SPIDERCMS_USER_SESSION_COOKIE] ?? ($_SESSION['spidercms_user_session'] ?? '');
+    if (!spidercms_valid_user_session_id($id) || !isset($sessions[$id])) {
+        $id = 'usr_' . date('YmdHis') . '_' . bin2hex(random_bytes(8));
+        $sessions[$id] = [
+            'id' => $id,
+            'created_at' => date('Y-m-d H:i:s'),
+            'created_ts' => time(),
+            'first_ip_hash' => hash('sha256', spidercms_client_ip()),
+            'user_agent' => substr((string)($_SERVER['HTTP_USER_AGENT'] ?? ''), 0, 250),
+        ];
+    }
+    $name = trim(strip_tags((string)$name));
+    $email = trim(strip_tags((string)$email));
+    if ($name !== '') $sessions[$id]['name'] = function_exists('mb_substr') ? mb_substr($name, 0, 120, 'UTF-8') : substr($name, 0, 120);
+    if ($email !== '' && filter_var($email, FILTER_VALIDATE_EMAIL)) $sessions[$id]['email'] = $email;
+    $sessions[$id]['last_seen_at'] = date('Y-m-d H:i:s');
+    $sessions[$id]['last_seen_ts'] = time();
+    $sessions[$id]['last_ip_hash'] = hash('sha256', spidercms_client_ip());
+    spidercms_save_user_sessions($sessions);
+    $_SESSION['spidercms_user_session'] = $id;
+    spidercms_set_user_session_cookie($id);
+    return $sessions[$id];
+}
+
+
+
+// ----------------------------------------------------------------------
+// SPIDERCMS ADMIN USERS - FLAT FILE USER MANAGEMENT
+// ----------------------------------------------------------------------
+define('SPIDERCMS_ADMIN_USERS_FILE', SPIDERCMS_USER_SESSIONS_DIR . '/admin_users.json');
+
+function spidercms_admin_users_bootstrap() {
+    if (!is_dir(SPIDERCMS_USER_SESSIONS_DIR)) {
+        @mkdir(SPIDERCMS_USER_SESSIONS_DIR, 0750, true);
+    }
+    spidercms_write_htaccess(SPIDERCMS_USER_SESSIONS_DIR, "Options -Indexes\nRequire all denied\nDeny from all\n");
+
+    if (!file_exists(SPIDERCMS_ADMIN_USERS_FILE)) {
+        @file_put_contents(SPIDERCMS_ADMIN_USERS_FILE, json_encode([], JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES), LOCK_EX);
+        @chmod(SPIDERCMS_ADMIN_USERS_FILE, 0640);
+    }
+}
+
+function spidercms_admin_users_load() {
+    spidercms_admin_users_bootstrap();
+    $data = json_decode((string)@file_get_contents(SPIDERCMS_ADMIN_USERS_FILE), true);
+    return is_array($data) ? $data : [];
+}
+
+function spidercms_admin_users_save(array $users) {
+    spidercms_admin_users_bootstrap();
+    $json = json_encode(array_values($users), JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    if ($json === false) return false;
+    $ok = @file_put_contents(SPIDERCMS_ADMIN_USERS_FILE, $json, LOCK_EX) !== false;
+    @chmod(SPIDERCMS_ADMIN_USERS_FILE, 0640);
+    return $ok;
+}
+
+function spidercms_admin_user_clean_username($username) {
+    $username = strtolower(trim((string)$username));
+    $username = preg_replace('/[^a-z0-9_\-.@]/', '', $username);
+    return substr($username, 0, 80);
+}
+
+function spidercms_admin_user_clean_role($role) {
+    $role = strtolower(trim((string)$role));
+    return in_array($role, ['admin','editor','moderator','viewer'], true) ? $role : 'editor';
+}
+
+function spidercms_admin_user_role_label($role) {
+    $labels = [
+        'admin' => 'Administrator',
+        'editor' => 'Editor',
+        'moderator' => 'Moderator',
+        'viewer' => 'Viewer',
+    ];
+    return $labels[$role] ?? $role;
+}
+
+function spidercms_admin_current_role() {
+    return $_SESSION['admin_user_role'] ?? 'admin';
+}
+
+function spidercms_admin_current_username() {
+    return $_SESSION['admin_username'] ?? 'admin';
+}
+
+function spidercms_admin_has_role($roles) {
+    $role = spidercms_admin_current_role();
+    if ($role === 'admin') return true;
+    $roles = (array)$roles;
+    return in_array($role, $roles, true);
+}
+
+function spidercms_admin_require_role($roles) {
+    if (!spidercms_admin_has_role($roles)) {
+        http_response_code(403);
+        exit('Brak uprawnień do wykonania tej akcji.');
+    }
+}
+
+
+function spidercms_admin_is_admin() {
+    return spidercms_admin_current_role() === 'admin';
+}
+
+function spidercms_admin_can_access_settings() {
+    return spidercms_admin_is_admin();
+}
+
+function spidercms_admin_settings_actions() {
+    return [
+        'save_settings',
+        'change_password',
+        'apply_site_preset',
+        'save_social_settings',
+    ];
+}
+
+function spidercms_admin_users_ensure_default($admin_hash = '') {
+    $users = spidercms_admin_users_load();
+    if (!empty($users)) return;
+
+    $hash = is_string($admin_hash) && $admin_hash !== ''
+        ? $admin_hash
+        : password_hash('admin', PASSWORD_DEFAULT);
+
+    $users[] = [
+        'id' => 'adm_' . date('YmdHis') . '_' . bin2hex(random_bytes(4)),
+        'username' => 'admin',
+        'display_name' => 'Administrator',
+        'email' => '',
+        'role' => 'admin',
+        'password_hash' => $hash,
+        'active' => true,
+        'created_at' => date('Y-m-d H:i:s'),
+        'last_login_at' => '',
+        'last_login_ip_hash' => '',
+    ];
+    spidercms_admin_users_save($users);
+}
+
+function spidercms_admin_authenticate_user($username, $password, $legacy_admin_hash = '') {
+    $username = spidercms_admin_user_clean_username($username);
+    $password = (string)$password;
+
+    if ($username === '') $username = 'admin';
+
+    spidercms_admin_users_ensure_default($legacy_admin_hash);
+    $users = spidercms_admin_users_load();
+
+    foreach ($users as $idx => $user) {
+        if (($user['username'] ?? '') !== $username) continue;
+        if (empty($user['active'])) return false;
+
+        if (password_verify($password, (string)($user['password_hash'] ?? ''))) {
+            $users[$idx]['last_login_at'] = date('Y-m-d H:i:s');
+            $users[$idx]['last_login_ip_hash'] = hash('sha256', spidercms_client_ip());
+            spidercms_admin_users_save($users);
+            return $users[$idx];
+        }
+        return false;
+    }
+
+    // Backward compatibility: old single-password login without user record.
+    if ($username === 'admin' && is_string($legacy_admin_hash) && $legacy_admin_hash !== '' && password_verify($password, $legacy_admin_hash)) {
+        spidercms_admin_users_ensure_default($legacy_admin_hash);
+        $users = spidercms_admin_users_load();
+        foreach ($users as $user) {
+            if (($user['username'] ?? '') === 'admin') return $user;
+        }
+        return [
+            'id' => 'legacy_admin',
+            'username' => 'admin',
+            'display_name' => 'Administrator',
+            'role' => 'admin',
+            'active' => true,
+        ];
+    }
+
+    return false;
+}
+
+
+// ----------------------------------------------------------------------
+// SPIDERCMS DEMO PASSWORD RESET
+// ----------------------------------------------------------------------
+if (!defined('SPIDERCMS_PASSWORD_RESETS_FILE')) {
+    define('SPIDERCMS_PASSWORD_RESETS_FILE', SPIDERCMS_USER_SESSIONS_DIR . '/password_resets.json');
+}
+
+function spidercms_password_resets_load() {
+    spidercms_admin_users_bootstrap();
+    $data = json_decode((string)@file_get_contents(SPIDERCMS_PASSWORD_RESETS_FILE), true);
+    return is_array($data) ? $data : [];
+}
+
+function spidercms_password_resets_save(array $tokens) {
+    spidercms_admin_users_bootstrap();
+    $json = json_encode($tokens, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    if ($json === false) return false;
+    $ok = @file_put_contents(SPIDERCMS_PASSWORD_RESETS_FILE, $json, LOCK_EX) !== false;
+    @chmod(SPIDERCMS_PASSWORD_RESETS_FILE, 0640);
+    return $ok;
+}
+
+function spidercms_password_reset_cleanup() {
+    $tokens = spidercms_password_resets_load();
+    $now = time();
+    $changed = false;
+
+    foreach ($tokens as $token => $row) {
+        if (!is_array($row) || (int)($row['expires_at'] ?? 0) < $now || !empty($row['used'])) {
+            unset($tokens[$token]);
+            $changed = true;
+        }
+    }
+
+    if ($changed) spidercms_password_resets_save($tokens);
+}
+
+function spidercms_password_reset_base_admin_url() {
+    $scheme = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http';
+    $host = $_SERVER['HTTP_HOST'] ?? '';
+    $script = $_SERVER['SCRIPT_NAME'] ?? '/admin.php';
+    if ($host === '') return 'admin.php';
+    return $scheme . '://' . $host . $script;
+}
+
+function spidercms_password_reset_find_user($username_or_email) {
+    $needle = strtolower(trim((string)$username_or_email));
+    if ($needle === '') return null;
+
+    foreach (spidercms_admin_users_load() as $idx => $user) {
+        $u = strtolower((string)($user['username'] ?? ''));
+        $e = strtolower((string)($user['email'] ?? ''));
+        if ($needle === $u || ($e !== '' && $needle === $e)) {
+            $user['_index'] = $idx;
+            return $user;
+        }
+    }
+
+    return null;
+}
+
+function spidercms_password_reset_create_token($username_or_email) {
+    spidercms_password_reset_cleanup();
+    $user = spidercms_password_reset_find_user($username_or_email);
+    if (!$user || empty($user['active'])) return false;
+
+    $token = bin2hex(random_bytes(32));
+    $tokens = spidercms_password_resets_load();
+    $tokens[$token] = [
+        'username' => (string)($user['username'] ?? ''),
+        'created_at' => time(),
+        'expires_at' => time() + 3600,
+        'ip_hash' => hash('sha256', spidercms_client_ip()),
+        'used' => false,
+    ];
+    spidercms_password_resets_save($tokens);
+
+    return [
+        'token' => $token,
+        'user' => $user,
+        'url' => spidercms_password_reset_base_admin_url() . '?reset_token=' . rawurlencode($token),
+    ];
+}
+
+function spidercms_password_reset_get_valid($token) {
+    spidercms_password_reset_cleanup();
+    $token = trim((string)$token);
+    if ($token === '') return false;
+
+    $tokens = spidercms_password_resets_load();
+    if (empty($tokens[$token]) || !is_array($tokens[$token])) return false;
+
+    $row = $tokens[$token];
+    if (!empty($row['used'])) return false;
+    if ((int)($row['expires_at'] ?? 0) < time()) return false;
+
+    return $row;
+}
+
+function spidercms_password_reset_apply($token, $new_password) {
+    $row = spidercms_password_reset_get_valid($token);
+    if (!$row) return false;
+
+    $new_password = (string)$new_password;
+    if (strlen($new_password) < 6) return false;
+
+    $users = spidercms_admin_users_load();
+    $changed = false;
+
+    foreach ($users as &$user) {
+        if (($user['username'] ?? '') === ($row['username'] ?? '')) {
+            $user['password_hash'] = password_hash($new_password, PASSWORD_DEFAULT);
+            $user['active'] = true;
+            $changed = true;
+            break;
+        }
+    }
+    unset($user);
+
+    if (!$changed) return false;
+
+    spidercms_admin_users_save($users);
+
+    $tokens = spidercms_password_resets_load();
+    if (isset($tokens[$token])) {
+        $tokens[$token]['used'] = true;
+        $tokens[$token]['used_at'] = time();
+    }
+    spidercms_password_resets_save($tokens);
+
+    spidercms_log_action('password_reset_success', 'success', ['username' => $row['username'] ?? '']);
+    return true;
+}
+
+function spidercms_admin_users_tab_html($toast = null) {
+    $users = spidercms_admin_users_load();
+    $current = spidercms_admin_current_username();
+    ob_start();
+    ?>
+    <section class="settings-clean-intro">
+        <div>
+            <p class="settings-kicker">Users</p>
+            <h2>Administrator accounts</h2>
+            <p>Create accounts, assign roles and block access without using a database. Users are saved in <code>.users/admin_users.json</code>.</p>
+        </div>
+    </section>
+
+    <div class="settings-grid">
+        <div class="settings-card">
+            <h3><i class="fa-solid fa-user-plus"></i> Add user</h3>
+            <form method="post" class="settings-form">
+                <?= csrf_field() ?>
+                <input type="hidden" name="action" value="add_admin_user">
+
+                <label>Username</label>
+                <input type="text" name="username" required placeholder="editor" autocomplete="off">
+
+                <label>Display name</label>
+                <input type="text" name="display_name" placeholder="John Smith">
+
+                <label>Email</label>
+                <input type="email" name="email" placeholder="name@example.com">
+
+                <label>Password</label>
+                <input type="password" name="password" required minlength="6" autocomplete="new-password">
+
+                <label>Role</label>
+                <select name="role">
+                    <option value="admin">Administrator - full access</option>
+                    <option value="editor">Editor - pages and media</option>
+                    <option value="moderator">Moderator - chat, bookings and logs</option>
+                    <option value="viewer">Viewer - read only</option>
+                </select>
+
+                <button type="submit" class="btn-primary"><i class="fa-solid fa-plus"></i> Create user</button>
+            </form>
+        </div>
+
+        <div class="settings-card">
+            <h3><i class="fa-solid fa-users-gear"></i> Existing users</h3>
+            <div style="overflow:auto;">
+                <table class="logs-table">
+                    <thead>
+                        <tr>
+                            <th>Username</th>
+                            <th>Name</th>
+                            <th>Role</th>
+                            <th>Status</th>
+                            <th>Last login</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                    <?php foreach ($users as $user): ?>
+                        <?php
+                        $username = (string)($user['username'] ?? '');
+                        $is_self = $username === $current;
+                        ?>
+                        <tr>
+                            <td><strong><?= e($username) ?></strong><br><small><?= e($user['email'] ?? '') ?></small></td>
+                            <td><?= e($user['display_name'] ?? '') ?></td>
+                            <td><?= e(spidercms_admin_user_role_label($user['role'] ?? 'editor')) ?></td>
+                            <td><?= !empty($user['active']) ? '<span class="log-badge success">Active</span>' : '<span class="log-badge error">Blocked</span>' ?></td>
+                            <td><?= e($user['last_login_at'] ?? '-') ?></td>
+                            <td style="min-width:260px;">
+                                <details>
+                                    <summary class="btn-secondary" style="display:inline-flex;cursor:pointer;">Edit</summary>
+                                    <form method="post" style="margin-top:.75rem;display:grid;gap:.5rem;">
+                                        <?= csrf_field() ?>
+                                        <input type="hidden" name="action" value="update_admin_user">
+                                        <input type="hidden" name="user_id" value="<?= e($user['id'] ?? '') ?>">
+                                        <input type="text" name="display_name" value="<?= e($user['display_name'] ?? '') ?>" placeholder="Display name">
+                                        <input type="email" name="email" value="<?= e($user['email'] ?? '') ?>" placeholder="Email">
+                                        <select name="role" <?= $is_self ? 'disabled' : '' ?>>
+                                            <?php foreach (['admin'=>'Administrator','editor'=>'Editor','moderator'=>'Moderator','viewer'=>'Viewer'] as $role => $label): ?>
+                                                <option value="<?= e($role) ?>" <?= (($user['role'] ?? '') === $role) ? 'selected' : '' ?>><?= e($label) ?></option>
+                                            <?php endforeach; ?>
+                                        </select>
+                                        <?php if ($is_self): ?>
+                                            <input type="hidden" name="role" value="<?= e($user['role'] ?? 'admin') ?>">
+                                        <?php endif; ?>
+                                        <input type="password" name="new_password" placeholder="New password (leave empty to keep)">
+                                        <label style="display:flex;gap:.5rem;align-items:center;">
+                                            <input type="checkbox" name="active" value="1" <?= !empty($user['active']) ? 'checked' : '' ?> <?= $is_self ? 'disabled' : '' ?>>
+                                            Active account
+                                        </label>
+                                        <?php if ($is_self): ?>
+                                            <input type="hidden" name="active" value="1">
+                                        <?php endif; ?>
+                                        <button type="submit" class="btn-primary">Save user</button>
+                                    </form>
+                                </details>
+
+                                <?php if (!$is_self): ?>
+                                    <form method="post" style="display:inline;" onsubmit="return confirm('Delete this user?');">
+                                        <?= csrf_field() ?>
+                                        <input type="hidden" name="action" value="delete_admin_user">
+                                        <input type="hidden" name="user_id" value="<?= e($user['id'] ?? '') ?>">
+                                        <button type="submit" class="btn-danger">Delete</button>
+                                    </form>
+                                <?php endif; ?>
+                            </td>
+                        </tr>
+                    <?php endforeach; ?>
+                    <?php if (empty($users)): ?>
+                        <tr><td colspan="6">No users found.</td></tr>
+                    <?php endif; ?>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+    <?php
+    return ob_get_clean();
+}
+
+
+// ----------------------------------------------------------------------
+// STRONY TYMCZASOWE POWIĄZANE Z AKTUALNĄ SESJĄ
+// ----------------------------------------------------------------------
+// Zasada działania:
+// - każda strona utworzona w panelu zostaje przypisana do aktualnej sesji PHP,
+// - jeśli sesja nie ma aktywności dłużej niż 10 minut, jej strony są kasowane,
+// - kliknięcie „Wyloguj” usuwa strony tej sesji natychmiast,
+// - chroniony jest wyłącznie fizyczny plik index.php w katalogu z admin.php.
+//   Uwaga: strona ustawiona w CMS jako główna, np. pages/ppp.php, NIE jest blokowana.
+define('SPIDERCMS_SESSION_PAGE_TTL', 10 * 60);
+define('SPIDERCMS_SESSION_PAGES_FILE', SPIDERCMS_USER_SESSIONS_DIR . '/session_pages.json');
+
+function spidercms_session_pages_bootstrap() {
+    spidercms_user_sessions_bootstrap();
+    if (!file_exists(SPIDERCMS_SESSION_PAGES_FILE)) {
+        @file_put_contents(SPIDERCMS_SESSION_PAGES_FILE, json_encode([], JSON_PRETTY_PRINT), LOCK_EX);
+        @chmod(SPIDERCMS_SESSION_PAGES_FILE, 0640);
+    }
+}
+
+function spidercms_load_session_pages() {
+    spidercms_session_pages_bootstrap();
+    $data = json_decode((string)@file_get_contents(SPIDERCMS_SESSION_PAGES_FILE), true);
+    return is_array($data) ? $data : [];
+}
+
+function spidercms_save_session_pages(array $data) {
+    spidercms_session_pages_bootstrap();
+    $json = json_encode($data, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    if ($json === false) return false;
+    $ok = @file_put_contents(SPIDERCMS_SESSION_PAGES_FILE, $json, LOCK_EX) !== false;
+    @chmod(SPIDERCMS_SESSION_PAGES_FILE, 0640);
+    return $ok;
+}
+
+function spidercms_current_session_key() {
+    $sid = session_id();
+    return $sid !== '' ? hash('sha256', $sid) : '';
+}
+
+function spidercms_is_path_inside($path, $base) {
+    $real_path = realpath($path);
+    $real_base = realpath($base);
+    if ($real_path === false || $real_base === false) return false;
+    return strpos($real_path, rtrim($real_base, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR) === 0;
+}
+
+function spidercms_is_protected_homepage_slug($slug) {
+    // Nie blokujemy strony ustawionej w CMS jako główna, np. pages/ppp.php.
+    // Ochrona dotyczy tylko prawdziwego pliku __DIR__/index.php, sprawdzanego przez spidercms_is_protected_page_file().
+    return false;
+}
+
+function spidercms_is_protected_page_file($file) {
+    $real = realpath($file);
+    if ($real === false) return false;
+    $root_index = realpath(__DIR__ . '/index.php');
+    if ($root_index !== false && $real === $root_index) return true;
+    return false;
+}
+
+function spidercms_register_session_page($file, $slug, $folder) {
+    $session_key = spidercms_current_session_key();
+    if ($session_key === '') return false;
+    $file = (string)$file;
+    $slug = spidercms_clean_slug($slug);
+    $folder = spidercms_sanitize_page_folder($folder);
+    if ($slug === '' || spidercms_is_protected_homepage_slug($slug) || spidercms_is_protected_page_file($file)) return false;
+    $data = spidercms_load_session_pages();
+    if (!isset($data[$session_key]) || !is_array($data[$session_key])) {
+        $data[$session_key] = [
+            'created_at' => date('Y-m-d H:i:s'),
+            'created_ts' => time(),
+            'last_activity_at' => date('Y-m-d H:i:s'),
+            'last_activity_ts' => time(),
+            'pages' => [],
+        ];
+    }
+    $data[$session_key]['last_activity_at'] = date('Y-m-d H:i:s');
+    $data[$session_key]['last_activity_ts'] = time();
+    $data[$session_key]['pages'][$file] = [
+        'file' => $file,
+        'slug' => $slug,
+        'folder' => $folder,
+        'created_at' => date('Y-m-d H:i:s'),
+        'created_ts' => time(),
+    ];
+    return spidercms_save_session_pages($data);
+}
+
+function spidercms_touch_current_session_pages() {
+    $session_key = spidercms_current_session_key();
+    if ($session_key === '') return;
+    $data = spidercms_load_session_pages();
+    if (isset($data[$session_key]) && is_array($data[$session_key])) {
+        $data[$session_key]['last_activity_at'] = date('Y-m-d H:i:s');
+        $data[$session_key]['last_activity_ts'] = time();
+        spidercms_save_session_pages($data);
+    }
+}
+
+function spidercms_delete_pages_for_session_key($session_key, $reason = 'session_cleanup') {
+    if ($session_key === '') return 0;
+    $data = spidercms_load_session_pages();
+    if (empty($data[$session_key]['pages']) || !is_array($data[$session_key]['pages'])) {
+        unset($data[$session_key]);
+        spidercms_save_session_pages($data);
+        return 0;
+    }
+    $deleted = 0;
+    foreach ($data[$session_key]['pages'] as $file => $meta) {
+        $file = (string)($meta['file'] ?? $file);
+        $slug = spidercms_clean_slug($meta['slug'] ?? basename($file, '.php'));
+        if ($slug === '' || spidercms_is_protected_homepage_slug($slug) || spidercms_is_protected_page_file($file)) continue;
+        $base_dir = defined('ACTIVE_PAGES_DIR') ? ACTIVE_PAGES_DIR : (__DIR__ . '/' . spidercms_sanitize_page_folder($meta['folder'] ?? 'pages'));
+        if (!spidercms_is_path_inside($file, $base_dir)) continue;
+        if (is_file($file) && @unlink($file)) $deleted++;
+    }
+    unset($data[$session_key]);
+    spidercms_save_session_pages($data);
+    spidercms_log_action('session_pages_cleanup', 'success', ['reason' => $reason, 'deleted' => $deleted]);
+    return $deleted;
+}
+
+function spidercms_cleanup_expired_session_pages() {
+    $data = spidercms_load_session_pages();
+    $now = time();
+    foreach ($data as $session_key => $row) {
+        $last = (int)($row['last_activity_ts'] ?? $row['created_ts'] ?? 0);
+        if ($last > 0 && ($now - $last) > SPIDERCMS_SESSION_PAGE_TTL) {
+            spidercms_delete_pages_for_session_key((string)$session_key, 'inactive_10_minutes');
+        }
+    }
+}
+
+
+// ----------------------------------------------------------------------
 // SYSTEM LOGÓW – rejestrowanie akcji administratora
 // ----------------------------------------------------------------------
 define('SPIDERCMS_LOG_DIR', __DIR__ . '/.logs');
@@ -106,13 +1473,14 @@ function spidercms_log_label($action) {
         'save_chat_settings'=>'Zapis ustawień czatu','test_chat_email'=>'Test e-mail / SMTP',
         'chat_reply'=>'Odpowiedź na czacie','chat_mark_read'=>'Oznaczenie rozmowy jako przeczytanej',
         'chat_archive'=>'Archiwizacja rozmowy','chat_delete'=>'Usunięcie rozmowy','clear_action_logs'=>'Czyszczenie logów',
-        'export_action_logs'=>'Eksport logów akcji','add_admin_user'=>'Dodanie użytkownika','update_admin_user'=>'Edycja użytkownika','delete_admin_user'=>'Usunięcie użytkownika','permission_denied_settings_tab'=>'Odmowa dostępu do ustawień','permission_denied_settings_action'=>'Odmowa zmiany ustawień','password_reset_request'=>'Prośba o reset hasła','password_reset_success'=>'Reset hasła'
+        'export_action_logs'=>'Eksport logów akcji','password_reset_request'=>'Prośba o reset hasła','password_reset_success'=>'Reset hasła'
     ];
     return $labels[$action] ?? $action;
 }
 
 function spidercms_log_action($action, $status = 'info', array $context = []) {
     spidercms_logs_bootstrap();
+spidercms_user_sessions_bootstrap();
     $entry = [
         'time'=>date('Y-m-d H:i:s'), 'timestamp'=>time(), 'action'=>(string)$action,
         'label'=>spidercms_log_label((string)$action), 'status'=>(string)$status,
@@ -269,441 +1637,6 @@ function spidercms_log_status_badge($status) {
 
 spidercms_logs_bootstrap();
 
-
-// ----------------------------------------------------------------------
-// SPIDERCMS ADMIN USERS - konta użytkowników panelu
-// ----------------------------------------------------------------------
-if (!defined('SPIDERCMS_ADMIN_USERS_DIR')) {
-    define('SPIDERCMS_ADMIN_USERS_DIR', __DIR__ . '/.users');
-}
-if (!defined('SPIDERCMS_ADMIN_USERS_FILE')) {
-    define('SPIDERCMS_ADMIN_USERS_FILE', SPIDERCMS_ADMIN_USERS_DIR . '/admin_users.json');
-}
-
-function spidercms_admin_users_bootstrap() {
-    if (!is_dir(SPIDERCMS_ADMIN_USERS_DIR)) {
-        @mkdir(SPIDERCMS_ADMIN_USERS_DIR, 0750, true);
-    }
-    spidercms_write_htaccess(SPIDERCMS_ADMIN_USERS_DIR, "Options -Indexes\nRequire all denied\nDeny from all\n");
-
-    if (!file_exists(SPIDERCMS_ADMIN_USERS_FILE)) {
-        @file_put_contents(SPIDERCMS_ADMIN_USERS_FILE, json_encode([], JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES), LOCK_EX);
-        @chmod(SPIDERCMS_ADMIN_USERS_FILE, 0640);
-    }
-}
-
-function spidercms_admin_users_load() {
-    spidercms_admin_users_bootstrap();
-    $data = json_decode((string)@file_get_contents(SPIDERCMS_ADMIN_USERS_FILE), true);
-    return is_array($data) ? $data : [];
-}
-
-function spidercms_admin_users_save(array $users) {
-    spidercms_admin_users_bootstrap();
-    $json = json_encode(array_values($users), JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
-    if ($json === false) return false;
-    $ok = @file_put_contents(SPIDERCMS_ADMIN_USERS_FILE, $json, LOCK_EX) !== false;
-    @chmod(SPIDERCMS_ADMIN_USERS_FILE, 0640);
-    return $ok;
-}
-
-function spidercms_admin_user_clean_username($username) {
-    $username = strtolower(trim((string)$username));
-    $username = preg_replace('/[^a-z0-9_\-.@]/', '', $username);
-    return substr($username, 0, 80);
-}
-
-function spidercms_admin_user_clean_role($role) {
-    $role = strtolower(trim((string)$role));
-    return in_array($role, ['admin','editor','moderator','viewer'], true) ? $role : 'editor';
-}
-
-function spidercms_admin_user_role_label($role) {
-    $labels = [
-        'admin' => 'Administrator',
-        'editor' => 'Edytor',
-        'moderator' => 'Moderator',
-        'viewer' => 'Podgląd',
-    ];
-    return $labels[$role] ?? $role;
-}
-
-function spidercms_admin_current_username() {
-    return $_SESSION['admin_username'] ?? 'admin';
-}
-
-function spidercms_admin_current_role() {
-    return $_SESSION['admin_user_role'] ?? 'admin';
-}
-
-function spidercms_admin_has_role($roles) {
-    $role = spidercms_admin_current_role();
-    if ($role === 'admin') return true;
-    return in_array($role, (array)$roles, true);
-}
-
-function spidercms_admin_require_role($roles) {
-    if (!spidercms_admin_has_role($roles)) {
-        http_response_code(403);
-        exit('Brak uprawnień do wykonania tej akcji.');
-    }
-}
-
-
-function spidercms_admin_is_admin() {
-    return spidercms_admin_current_role() === 'admin';
-}
-
-function spidercms_admin_can_access_settings() {
-    return spidercms_admin_is_admin();
-}
-
-function spidercms_admin_settings_actions() {
-    return [
-        'save_settings',
-        'change_password',
-        'apply_site_preset',
-        'save_social_settings',
-    ];
-}
-
-
-function spidercms_admin_users_ensure_default($admin_hash = '') {
-    $users = spidercms_admin_users_load();
-    if (!empty($users)) return;
-
-    $hash = (is_string($admin_hash) && $admin_hash !== '') ? $admin_hash : password_hash('admin', PASSWORD_DEFAULT);
-
-    $users[] = [
-        'id' => 'adm_' . date('YmdHis') . '_' . bin2hex(random_bytes(4)),
-        'username' => 'admin',
-        'display_name' => 'Administrator',
-        'email' => '',
-        'role' => 'admin',
-        'password_hash' => $hash,
-        'active' => true,
-        'created_at' => date('Y-m-d H:i:s'),
-        'last_login_at' => '',
-        'last_login_ip_hash' => '',
-    ];
-    spidercms_admin_users_save($users);
-}
-
-function spidercms_admin_authenticate_user($username, $password, $legacy_admin_hash = '') {
-    $username = spidercms_admin_user_clean_username($username);
-    if ($username === '') $username = 'admin';
-
-    spidercms_admin_users_ensure_default($legacy_admin_hash);
-    $users = spidercms_admin_users_load();
-
-    foreach ($users as $idx => $user) {
-        if (($user['username'] ?? '') !== $username) continue;
-        if (empty($user['active'])) return false;
-
-        if (password_verify((string)$password, (string)($user['password_hash'] ?? ''))) {
-            $users[$idx]['last_login_at'] = date('Y-m-d H:i:s');
-            $users[$idx]['last_login_ip_hash'] = hash('sha256', spidercms_client_ip());
-            spidercms_admin_users_save($users);
-            return $users[$idx];
-        }
-        return false;
-    }
-
-    // Kompatybilność z poprzednim systemem: login admin + stare hasło z config.php.
-    if ($username === 'admin' && is_string($legacy_admin_hash) && $legacy_admin_hash !== '' && password_verify((string)$password, $legacy_admin_hash)) {
-        spidercms_admin_users_ensure_default($legacy_admin_hash);
-        $users = spidercms_admin_users_load();
-        foreach ($users as $user) {
-            if (($user['username'] ?? '') === 'admin') return $user;
-        }
-    }
-
-    return false;
-}
-
-
-// ----------------------------------------------------------------------
-// SPIDERCMS PASSWORD RESET
-// ----------------------------------------------------------------------
-if (!defined('SPIDERCMS_PASSWORD_RESETS_FILE')) {
-    define('SPIDERCMS_PASSWORD_RESETS_FILE', SPIDERCMS_ADMIN_USERS_DIR . '/password_resets.json');
-}
-
-function spidercms_password_resets_load() {
-    spidercms_admin_users_bootstrap();
-    $data = json_decode((string)@file_get_contents(SPIDERCMS_PASSWORD_RESETS_FILE), true);
-    return is_array($data) ? $data : [];
-}
-
-function spidercms_password_resets_save(array $tokens) {
-    spidercms_admin_users_bootstrap();
-    $json = json_encode($tokens, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
-    if ($json === false) return false;
-    $ok = @file_put_contents(SPIDERCMS_PASSWORD_RESETS_FILE, $json, LOCK_EX) !== false;
-    @chmod(SPIDERCMS_PASSWORD_RESETS_FILE, 0640);
-    return $ok;
-}
-
-function spidercms_password_reset_cleanup() {
-    $tokens = spidercms_password_resets_load();
-    $now = time();
-    $changed = false;
-    foreach ($tokens as $token => $row) {
-        if (!is_array($row) || (int)($row['expires_at'] ?? 0) < $now || !empty($row['used'])) {
-            unset($tokens[$token]);
-            $changed = true;
-        }
-    }
-    if ($changed) spidercms_password_resets_save($tokens);
-}
-
-function spidercms_password_reset_base_admin_url() {
-    $scheme = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http';
-    $host = $_SERVER['HTTP_HOST'] ?? '';
-    $script = $_SERVER['SCRIPT_NAME'] ?? '/admin.php';
-    if ($host === '') return 'admin.php';
-    return $scheme . '://' . $host . $script;
-}
-
-function spidercms_password_reset_find_user($username_or_email) {
-    $needle = strtolower(trim((string)$username_or_email));
-    if ($needle === '') return null;
-    foreach (spidercms_admin_users_load() as $idx => $user) {
-        $u = strtolower((string)($user['username'] ?? ''));
-        $e = strtolower((string)($user['email'] ?? ''));
-        if ($needle === $u || ($e !== '' && $needle === $e)) {
-            $user['_index'] = $idx;
-            return $user;
-        }
-    }
-    return null;
-}
-
-function spidercms_password_reset_create_token($username_or_email) {
-    spidercms_password_reset_cleanup();
-    $user = spidercms_password_reset_find_user($username_or_email);
-    if (!$user || empty($user['active'])) return false;
-
-    $token = bin2hex(random_bytes(32));
-    $tokens = spidercms_password_resets_load();
-    $tokens[$token] = [
-        'username' => (string)($user['username'] ?? ''),
-        'created_at' => time(),
-        'expires_at' => time() + 3600,
-        'ip_hash' => hash('sha256', spidercms_client_ip()),
-        'used' => false,
-    ];
-    spidercms_password_resets_save($tokens);
-
-    return [
-        'token' => $token,
-        'user' => $user,
-        'url' => spidercms_password_reset_base_admin_url() . '?reset_token=' . rawurlencode($token),
-    ];
-}
-
-function spidercms_password_reset_send_email($email, $url, $username = '') {
-    $email = trim((string)$email);
-    if ($email === '' || !filter_var($email, FILTER_VALIDATE_EMAIL)) return false;
-
-    $subject = 'Reset hasła SpiderCMS';
-    $body = "Witaj" . ($username !== '' ? " " . $username : "") . ",\n\n";
-    $body .= "Otrzymaliśmy prośbę o reset hasła do panelu SpiderCMS.\n\n";
-    $body .= "Kliknij link poniżej, aby ustawić nowe hasło. Link jest ważny przez 1 godzinę:\n";
-    $body .= $url . "\n\n";
-    $body .= "Jeżeli to nie Ty wysłałeś tę prośbę, zignoruj tę wiadomość.\n";
-
-    $headers = "Content-Type: text/plain; charset=UTF-8\r\n";
-    return @mail($email, $subject, $body, $headers);
-}
-
-function spidercms_password_reset_get_valid($token) {
-    spidercms_password_reset_cleanup();
-    $token = trim((string)$token);
-    if ($token === '') return false;
-    $tokens = spidercms_password_resets_load();
-    if (empty($tokens[$token]) || !is_array($tokens[$token])) return false;
-    $row = $tokens[$token];
-    if (!empty($row['used'])) return false;
-    if ((int)($row['expires_at'] ?? 0) < time()) return false;
-    return $row;
-}
-
-function spidercms_password_reset_apply($token, $new_password) {
-    $row = spidercms_password_reset_get_valid($token);
-    if (!$row) return false;
-
-    $new_password = (string)$new_password;
-    if (strlen($new_password) < 6) return false;
-
-    $users = spidercms_admin_users_load();
-    $changed = false;
-    foreach ($users as &$user) {
-        if (($user['username'] ?? '') === ($row['username'] ?? '')) {
-            $user['password_hash'] = password_hash($new_password, PASSWORD_DEFAULT);
-            $user['active'] = true;
-            $changed = true;
-            break;
-        }
-    }
-    unset($user);
-
-    if (!$changed) return false;
-    spidercms_admin_users_save($users);
-
-    $tokens = spidercms_password_resets_load();
-    if (isset($tokens[$token])) {
-        $tokens[$token]['used'] = true;
-        $tokens[$token]['used_at'] = time();
-    }
-    spidercms_password_resets_save($tokens);
-
-    spidercms_log_action('password_reset_success', 'success', ['username' => $row['username'] ?? '']);
-    return true;
-}
-
-function spidercms_admin_users_tab_html() {
-    $users = spidercms_admin_users_load();
-    $current = spidercms_admin_current_username();
-
-    ob_start();
-    ?>
-    <div class="card">
-        <h2 style="margin-bottom:1rem;"><i class="fa-solid fa-users-gear"></i> Użytkownicy panelu</h2>
-        <p style="color:#94a3b8;margin-bottom:1.5rem;">
-            Twórz konta użytkowników panelu SpiderCMS, przypisuj role, resetuj hasła oraz blokuj dostęp. Jeśli użytkownik ma wpisany e-mail, może użyć opcji „Nie pamiętasz hasła?”.
-            Dane są zapisywane bez bazy danych w pliku <code>.users/admin_users.json</code>.
-        </p>
-
-        <div class="spider-users-layout">
-            <div class="card spider-user-card">
-                <h3><i class="fa-solid fa-user-plus"></i> Dodaj użytkownika</h3>
-                <form method="post" class="spider-user-form">
-                    <?= csrf_field() ?>
-                    <input type="hidden" name="action" value="add_admin_user">
-
-                    <label>Login</label>
-                    <input type="text" name="username" required placeholder="editor" autocomplete="off">
-
-                    <label>Nazwa wyświetlana</label>
-                    <input type="text" name="display_name" placeholder="Jan Kowalski">
-
-                    <label>E-mail</label>
-                    <input type="email" name="email" placeholder="name@example.com">
-
-                    <label>Hasło</label>
-                    <input type="password" name="password" required minlength="6" autocomplete="new-password">
-
-                    <label>Rola</label>
-                    <select name="role">
-                        <option value="admin">Administrator - pełny dostęp</option>
-                        <option value="editor">Edytor - strony i media</option>
-                        <option value="moderator">Moderator - chat, rezerwacje i logi</option>
-                        <option value="viewer">Podgląd - tylko odczyt</option>
-                    </select>
-
-                    <button type="submit" class="btn btn-edit"><i class="fa-solid fa-plus"></i> Utwórz użytkownika</button>
-                </form>
-            </div>
-
-            <div class="card spider-user-card spider-users-table-wrap">
-                <h3><i class="fa-solid fa-users"></i> Lista użytkowników</h3>
-                <table class="logs-table">
-                    <thead>
-                        <tr>
-                            <th>Login</th>
-                            <th>Nazwa</th>
-                            <th>Rola</th>
-                            <th>Status</th>
-                            <th>Ostatnie logowanie</th>
-                            <th>Akcje</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                    <?php foreach ($users as $user): ?>
-                        <?php
-                        $username = (string)($user['username'] ?? '');
-                        $is_self = $username === $current;
-                        ?>
-                        <tr>
-                            <td><strong><?= e($username) ?></strong><br><small><?= e($user['email'] ?? '') ?></small></td>
-                            <td><?= e($user['display_name'] ?? '') ?></td>
-                            <td><?= e(spidercms_admin_user_role_label($user['role'] ?? 'editor')) ?></td>
-                            <td><?= !empty($user['active']) ? '<span class="log-badge success">Aktywne</span>' : '<span class="log-badge error">Zablokowane</span>' ?></td>
-                            <td><?= e($user['last_login_at'] ?? '-') ?></td>
-                            <td style="min-width:260px;">
-                                <details>
-                                    <summary class="btn btn-view spider-summary-btn">Edytuj</summary>
-                                    <form method="post" class="spider-user-form small">
-                                        <?= csrf_field() ?>
-                                        <input type="hidden" name="action" value="update_admin_user">
-                                        <input type="hidden" name="user_id" value="<?= e($user['id'] ?? '') ?>">
-
-                                        <input type="text" name="display_name" value="<?= e($user['display_name'] ?? '') ?>" placeholder="Nazwa wyświetlana">
-                                        <input type="email" name="email" value="<?= e($user['email'] ?? '') ?>" placeholder="E-mail">
-
-                                        <select name="role" <?= $is_self ? 'disabled' : '' ?>>
-                                            <?php foreach (['admin'=>'Administrator','editor'=>'Edytor','moderator'=>'Moderator','viewer'=>'Podgląd'] as $role => $label): ?>
-                                                <option value="<?= e($role) ?>" <?= (($user['role'] ?? '') === $role) ? 'selected' : '' ?>><?= e($label) ?></option>
-                                            <?php endforeach; ?>
-                                        </select>
-                                        <?php if ($is_self): ?>
-                                            <input type="hidden" name="role" value="<?= e($user['role'] ?? 'admin') ?>">
-                                        <?php endif; ?>
-
-                                        <input type="password" name="new_password" placeholder="Nowe hasło, zostaw puste bez zmian">
-
-                                        <label class="inline-check">
-                                            <input type="checkbox" name="active" value="1" <?= !empty($user['active']) ? 'checked' : '' ?> <?= $is_self ? 'disabled' : '' ?>>
-                                            Konto aktywne
-                                        </label>
-                                        <?php if ($is_self): ?>
-                                            <input type="hidden" name="active" value="1">
-                                        <?php endif; ?>
-
-                                        <button type="submit" class="btn btn-edit">Zapisz użytkownika</button>
-                                    </form>
-                                </details>
-
-                                <?php if (!$is_self): ?>
-                                    <form method="post" style="display:inline;" onsubmit="return confirm('Usunąć tego użytkownika?');">
-                                        <?= csrf_field() ?>
-                                        <input type="hidden" name="action" value="delete_admin_user">
-                                        <input type="hidden" name="user_id" value="<?= e($user['id'] ?? '') ?>">
-                                        <button type="submit" class="btn btn-delete">Usuń</button>
-                                    </form>
-                                <?php endif; ?>
-                            </td>
-                        </tr>
-                    <?php endforeach; ?>
-                    <?php if (empty($users)): ?>
-                        <tr><td colspan="6">Brak użytkowników.</td></tr>
-                    <?php endif; ?>
-                    </tbody>
-                </table>
-            </div>
-        </div>
-    </div>
-
-    <style>
-    .spider-users-layout{display:grid;grid-template-columns:minmax(280px,420px) 1fr;gap:1.5rem;align-items:start}
-    .spider-user-card{margin:0;background:rgba(15,23,42,.45)}
-    .spider-users-table-wrap{overflow:auto}
-    .spider-user-form{display:grid;gap:.75rem;margin-top:1rem}
-    .spider-user-form.small{margin-top:.75rem;gap:.5rem}
-    .spider-user-form input,.spider-user-form select{
-        width:100%;padding:.8rem .9rem;border-radius:10px;border:1px solid #334155;background:#0f172a;color:#f8fafc;box-sizing:border-box
-    }
-    .spider-user-form label{color:#cbd5e1;font-weight:700}
-    .inline-check{display:flex!important;gap:.5rem;align-items:center}
-    .inline-check input{width:auto!important}
-    .spider-summary-btn{display:inline-flex!important;cursor:pointer;margin-bottom:.4rem}
-    @media(max-width:980px){.spider-users-layout{grid-template-columns:1fr}}
-    </style>
-    <?php
-    return ob_get_clean();
-}
-
 // ----------------------------------------------------------------------
 // SPIDERCMS SECURITY HARDENING START
 // Dodatkowe zabezpieczenia serwerowe dla hostingu produkcyjnego.
@@ -827,6 +1760,7 @@ function spidercms_secure_private_dirs() {
         __DIR__ . '/.logs',
         __DIR__ . '/.stats',
         __DIR__ . '/.backups',
+        __DIR__ . '/.users',
     ];
 
     $private_htaccess = <<<'HTACCESS'
@@ -914,15 +1848,17 @@ if (!in_array($_SERVER['REQUEST_METHOD'] ?? 'GET', $allowed_methods, true)) {
 // Obsługa wylogowania
 // ----------------------------------------------------------------------
 if (isset($_GET['logout']) && $_GET['logout'] === '1') {
+    spidercms_delete_pages_for_session_key(spidercms_current_session_key(), 'logout');
     spidercms_log_action('logout', 'success');
     $_SESSION = [];
     session_destroy();
-    header('Location: admin.php');
+    header('Location: admin.php?session_pages_deleted=1');
     exit;
 }
 
 require_once __DIR__ . '/config.php';
 spidercms_admin_users_ensure_default($ADMIN_HASH ?? '');
+
 
 // ----------------------------------------------------------------------
 // BAZOWA ŚCIEŻKA
@@ -993,6 +1929,12 @@ if (!defined('ACTIVE_PAGES_DEPTH')) define('ACTIVE_PAGES_DEPTH', $active_pages_d
 // ----------------------------------------------------------------------
 $toast = ['type' => '', 'msg' => ''];
 $login_error = '';
+
+if (!empty($_SESSION['spidercms_update_success'])) {
+    $toast = ['type'=>'success','msg'=>(string)$_SESSION['spidercms_update_success']];
+    unset($_SESSION['spidercms_update_success']);
+}
+
 
 // ----------------------------------------------------------------------
 // Wczytanie ustawień i logo
@@ -1747,10 +2689,28 @@ function chat_backfill_archive_from_conversations() {
 }
 
 function chat_get_visitor_id() {
-    if (empty($_SESSION['spidercms_chat_id'])) {
-        $_SESSION['spidercms_chat_id'] = 'chat_' . date('YmdHis') . '_' . bin2hex(random_bytes(5));
+    $cookie_name = 'spidercms_chat_session';
+    $id = $_COOKIE[$cookie_name] ?? ($_SESSION['spidercms_chat_id'] ?? '');
+
+    if (!chat_valid_conversation_id($id)) {
+        $id = 'chat_' . date('YmdHis') . '_' . bin2hex(random_bytes(5));
     }
-    return $_SESSION['spidercms_chat_id'];
+
+    $_SESSION['spidercms_chat_id'] = $id;
+
+    if (!headers_sent()) {
+        $secure = !empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off';
+        setcookie($cookie_name, $id, [
+            'expires' => time() + (365 * 24 * 60 * 60),
+            'path' => '/',
+            'secure' => $secure,
+            'httponly' => true,
+            'samesite' => 'Lax',
+        ]);
+        $_COOKIE[$cookie_name] = $id;
+    }
+
+    return $id;
 }
 
 function chat_send_json($payload) {
@@ -2007,6 +2967,7 @@ function chat_public_add_message($name, $email, $message, $website = '') {
     if ($email !== '' && !filter_var($email, FILTER_VALIDATE_EMAIL)) {
         return ['ok' => false, 'error' => 'Podaj poprawny adres e-mail albo zostaw pole puste.'];
     }
+    spidercms_get_or_create_user_session($name, $email);
     $visitor_id = chat_get_visitor_id();
     $data = chat_load_conversations();
     if (!isset($data[$visitor_id])) {
@@ -2385,12 +3346,17 @@ function stats_increment_assoc(&$array, $key, $by = 1) {
 function stats_track_event($payload) {
     global $stats_settings;
     if (($stats_settings['enabled'] ?? '1') !== '1') return ['ok' => false, 'ignored' => 'disabled'];
-    if (($stats_settings['ignore_admin'] ?? '1') === '1' && !empty($_SESSION['logged_in'])) return ['ok' => true, 'ignored' => 'admin'];
+
+    $path = stats_clean_text($payload['path'] ?? ($_SERVER['HTTP_REFERER'] ?? '/'), 350);
+
+    // DEMO: ignoruj administratora tylko wtedy, gdy statystyka dotyczy panelu, a nie publicznej strony testowanej w tej samej przeglądarce.
+    $tracking_admin_panel = preg_match('~(^|/)admin\.php(\?|$)|tab=|action=live_editor~i', $path) === 1;
+    if (($stats_settings['ignore_admin'] ?? '1') === '1' && !empty($_SESSION['logged_in']) && $tracking_admin_panel) {
+        return ['ok' => true, 'ignored' => 'admin_panel'];
+    }
 
     $ua = $_SERVER['HTTP_USER_AGENT'] ?? '';
     if (($stats_settings['ignore_bots'] ?? '1') === '1' && stats_is_bot($ua)) return ['ok' => true, 'ignored' => 'bot'];
-
-    $path = stats_clean_text($payload['path'] ?? ($_SERVER['HTTP_REFERER'] ?? '/'), 350);
     $title = stats_clean_text($payload['title'] ?? '', 180);
     $ref = stats_clean_text($payload['referrer'] ?? '', 400);
     $visitor = stats_clean_text($payload['visitor'] ?? '', 120);
@@ -2523,14 +3489,17 @@ if (($stats_settings['enabled'] ?? '1') !== '1') return;
     <?php if (defined('BASE_URL') && BASE_URL !== ''): ?>
       candidates.push(<?php echo json_encode(rtrim(BASE_URL, '/') . '/admin.php'); ?>);
     <?php endif; ?>
-    candidates.push('admin.php','../admin.php','../../admin.php','../../../admin.php','/admin.php');
+    candidates.push('admin.php','../admin.php','../../admin.php','../../../admin.php','../../../../admin.php','/demo/admin.php','/admin.php');
+    candidates = candidates.filter(function(v, i, a){ return v && a.indexOf(v) === i; });
     var i = 0;
     function sendNext(){
       if(i >= candidates.length) return;
       var url = candidates[i++];
       fetch(url, {method:'POST', body:payload, credentials:'same-origin', cache:'no-store'}).then(function(r){
-        if(!r.ok) throw new Error('bad');
+        if(!r.ok) throw new Error('bad_status');
         return r.json();
+      }).then(function(j){
+        if(!j || j.ok === false) throw new Error('bad_json');
       }).catch(sendNext);
     }
     if('requestIdleCallback' in window) requestIdleCallback(sendNext); else setTimeout(sendNext, 800);
@@ -2560,6 +3529,15 @@ function stats_sync_widget_in_pages() {
 stats_write_widget_file();
 // UWAGA: nie synchronizujemy stron automatycznie przy każdym odświeżeniu panelu.
 // stats_sync_widget_in_pages();
+
+// Automatyczna lekka synchronizacja widgetu statystyk DEMO.
+$stats_autosync_file = $stats_dir . '/last_widget_sync.txt';
+$stats_autosync_last = file_exists($stats_autosync_file) ? (int)file_get_contents($stats_autosync_file) : 0;
+if ($stats_autosync_last < time() - 600) {
+    stats_sync_widget_in_pages();
+    @file_put_contents($stats_autosync_file, (string)time(), LOCK_EX);
+}
+
 
 
 // ----------------------------------------------------------------------
@@ -2761,7 +3739,7 @@ function update_all_pages_colors() {
 // Wymuszenie aktualnego presetu/motywu na wszystkich stronach
 // Poprzednia wersja zapisywała preset, ale nie każda starsza strona
 // miała poprawnie aktualizowany blok :root. Ten fix dodaje końcowy CSS
-// z aktualnymi zmiennymi motywu do <head>, więc działa też na index.php.
+// z aktualnymi zmiennymi motywu do <head>. Root index.php obok admin.php jest pomijany.
 // ----------------------------------------------------------------------
 function spidercms_apply_theme_css_to_all_pages() {
     global $theme;
@@ -2783,10 +3761,7 @@ function spidercms_apply_theme_css_to_all_pages() {
         }
     }
 
-    $root_index = __DIR__ . '/index.php';
-    if (is_file($root_index)) {
-        $files[] = $root_index;
-    }
+    // Nie dodajemy root index.php: to własna strona główna serwera i jej CSS ma zostać nietknięty.
 
     $files = array_values(array_unique($files));
 
@@ -2835,7 +3810,7 @@ function spidercms_apply_theme_css_to_all_pages() {
     $css .= "</style>";
 
     foreach ($files as $file) {
-        if (!is_file($file) || basename($file) === 'admin.php') continue;
+        if (!is_file($file) || basename($file) === 'admin.php' || spidercms_is_protected_page_file($file)) continue;
         $content = file_get_contents($file);
         $original = $content;
         $content = preg_replace('~<style\s+id=["\']spidercms-theme-preset-fix["\'][^>]*>.*?</style>\s*~is', '', $content);
@@ -3003,13 +3978,12 @@ function spidercms_sync_theme_css_link_in_pages() {
     if (defined('ACTIVE_PAGES_DIR')) {
         foreach (glob(ACTIVE_PAGES_DIR . '/*.php') ?: [] as $file) $files[] = $file;
     }
-    $root_index = __DIR__ . '/index.php';
-    if (is_file($root_index)) $files[] = $root_index;
+    // Nie dodajemy root index.php: to własna strona główna serwera i jej CSS ma zostać nietknięty.
 
     $files = array_values(array_unique($files));
 
     foreach ($files as $file) {
-        if (!is_file($file) || basename($file) === 'admin.php') continue;
+        if (!is_file($file) || basename($file) === 'admin.php' || spidercms_is_protected_page_file($file)) continue;
         $content = file_get_contents($file);
         $original = $content;
 
@@ -3130,11 +4104,7 @@ function spidercms_fix_opaque_header_in_pages() {
         }
     }
 
-    // Root index.php też może być stroną główną albo własnym szablonem.
-    $root_index = __DIR__ . '/index.php';
-    if (is_file($root_index)) {
-        $files[] = $root_index;
-    }
+    // Root index.php obok admin.php jest chroniony i nie jest modyfikowany przez poprawki wyglądu.
 
     // Dodatkowo poprawiamy typowe foldery z podstronami, bo użytkownik mógł zmienić folder stron.
     foreach (spidercms_available_page_folders() as $folder) {
@@ -3286,7 +4256,7 @@ body .site-header .menu-toggle{
 CSS;
 
     foreach ($files as $file) {
-        if (!is_file($file) || basename($file) === 'admin.php') {
+        if (!is_file($file) || basename($file) === 'admin.php' || spidercms_is_protected_page_file($file)) {
             continue;
         }
 
@@ -3345,7 +4315,7 @@ function spidercms_repair_pages_after_header_body_move() {
     $updated = 0;
 
     foreach ($files as $file) {
-        if (!is_file($file) || basename($file) === 'admin.php') continue;
+        if (!is_file($file) || basename($file) === 'admin.php' || spidercms_is_protected_page_file($file)) continue;
         $content = file_get_contents($file);
         $original = $content;
         $depth = substr_count(str_replace('\\', '/', dirname($file)), '/') - substr_count(str_replace('\\', '/', __DIR__), '/');
@@ -3403,10 +4373,7 @@ function spidercms_sync_content_width_in_pages() {
         }
     }
 
-    $root_index = __DIR__ . '/index.php';
-    if (is_file($root_index)) {
-        $files[] = $root_index;
-    }
+    // Nie dodajemy root index.php: to własna strona główna serwera i jej CSS ma zostać nietknięty.
 
     $files = array_values(array_unique($files));
 
@@ -3427,7 +4394,7 @@ main{
 CSS;
 
     foreach ($files as $file) {
-        if (!is_file($file) || basename($file) === 'admin.php') {
+        if (!is_file($file) || basename($file) === 'admin.php' || spidercms_is_protected_page_file($file)) {
             continue;
         }
 
@@ -3468,8 +4435,7 @@ function spidercms_cleanup_leading_garbage_in_public_pages() {
     $updated = 0;
     $files = [];
 
-    $root_index = __DIR__ . '/index.php';
-    if (is_file($root_index)) $files[] = $root_index;
+    // Nie dodajemy root index.php: to własna strona główna serwera i jej CSS ma zostać nietknięty.
 
     if (defined('ACTIVE_PAGES_DIR')) {
         foreach (glob(ACTIVE_PAGES_DIR . '/*.php') ?: [] as $file) $files[] = $file;
@@ -3485,7 +4451,7 @@ function spidercms_cleanup_leading_garbage_in_public_pages() {
     $files = array_values(array_unique($files));
 
     foreach ($files as $file) {
-        if (!is_file($file) || basename($file) === 'admin.php') continue;
+        if (!is_file($file) || basename($file) === 'admin.php' || spidercms_is_protected_page_file($file)) continue;
 
         $content = file_get_contents($file);
         $original = $content;
@@ -3519,21 +4485,14 @@ spidercms_cleanup_leading_garbage_in_public_pages();
 // Funkcja zapisująca przekierowanie strony głównej
 // ----------------------------------------------------------------------
 function write_homepage_redirect($slug) {
-    $slug = preg_replace('/[^a-z0-9\-_]+/i', '', (string)$slug);
-    if ($slug === '') {
-        $slug = 'index';
-    }
-
-    $index_path = __DIR__ . '/index.php';
-    $content = "<?php\n";
-    $content .= "require_once __DIR__ . '/config.php';\n";
-    $content .= "\$homepage = '" . addslashes($slug) . "';\n";
-    $target_base = rtrim($GLOBALS['active_pages_url'] ?? (defined('ACTIVE_PAGES_URL') ? ACTIVE_PAGES_URL : '/pages/'), '/');
-    $content .= "\$target = '" . addslashes($target_base) . "/' . \$homepage . '.php';\n";
-    $content .= "header('Location: ' . \$target);\n";
-    $content .= "exit;\n";
-
-    return file_put_contents($index_path, $content) !== false;
+    // Celowo nie nadpisujemy pliku __DIR__/index.php.
+    // Ten plik leży obok admin.php i jest własną stroną główną serwera użytkownika,
+    // więc jego kod oraz CSS mają pozostać bez zmian.
+    // Strona główna CMS jest zapisywana wyłącznie w pliku .homepage.
+    $slug = spidercms_clean_slug($slug);
+    if ($slug === '') $slug = 'index';
+    @file_put_contents(__DIR__ . '/.homepage', $slug, LOCK_EX);
+    return true;
 }
 
 
@@ -3901,10 +4860,6 @@ function spidercms_replace_page_content_source($source, $new_content) {
     $source = (string)$source;
     $new_content = (string)$new_content;
 
-    // Supports:
-    // $content = <<<HTML ... HTML;
-    // $content = <<<'HTML' ... HTML;
-    // $content = <<<"HTML" ... HTML;
     $heredoc_pattern = '/\$content\s*=\s*<<<[ \t]*(?:[\'"]?HTML[\'"]?)[ \t]*\R.*?\RHTML[ \t]*;/s';
 
     if (preg_match($heredoc_pattern, $source)) {
@@ -3913,7 +4868,6 @@ function spidercms_replace_page_content_source($source, $new_content) {
         }, $source, 1);
     }
 
-    // Fallback for pages that do not use $content but have a <main> block.
     if (preg_match('/<main\b[^>]*>.*?<\/main>/is', $source)) {
         return preg_replace_callback('/(<main\b[^>]*>).*?(<\/main>)/is', function($m) use ($new_content) {
             return $m[1] . "\n" . $new_content . "\n" . $m[2];
@@ -3984,7 +4938,7 @@ if (($_POST['action'] ?? '') === 'live_editor_save') {
     header('Content-Type: application/json; charset=utf-8');
     echo json_encode([
         'ok' => $ok,
-        'message' => $ok ? 'Zapisano zmiany LIVE.' : 'Nie udało się zapisać zmian. Sprawdź czy strona ma blok $content lub <main> oraz prawa zapisu pliku.'
+        'message' => $ok ? 'Zapisano zmiany LIVE.' : 'Nie udało się zapisać zmian.'
     ], JSON_UNESCAPED_UNICODE);
     exit;
 }
@@ -4072,6 +5026,13 @@ if (($_GET['action'] ?? '') === 'live_editor') {
             .live-mini-grid{display:grid;grid-template-columns:1fr 1fr;gap:.5rem}
             .live-mini-btn{border:1px solid rgba(255,255,255,.14);border-radius:12px;background:#020617;color:#e2e8f0;padding:.65rem;font-weight:800;cursor:pointer;text-align:center}
             .live-mini-btn:hover{background:#1e293b}
+            .live-toolbar-group{display:flex;gap:.35rem;flex-wrap:wrap;align-items:center}
+            .live-toolbar-sep{width:1px;height:30px;background:rgba(255,255,255,.16);margin:0 .1rem}
+            .live-select{border:1px solid rgba(255,255,255,.14);border-radius:10px;background:#020617;color:#e2e8f0;padding:.55rem .65rem;font-weight:700}
+            .live-color-wrap{display:inline-flex;align-items:center;gap:.35rem;border:1px solid rgba(255,255,255,.14);border-radius:10px;background:#020617;padding:.25rem .4rem}
+            .live-color-wrap input{width:28px;height:28px;padding:0;border:0;background:transparent;cursor:pointer}
+            .live-html-box{width:100%;min-height:260px;resize:vertical;border:1px solid #334155;border-radius:12px;background:#020617;color:#e2e8f0;padding:.8rem;font:13px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace}
+            .live-range{width:100%}
             .live-canvas.is-tablet{max-width:820px}
             .live-canvas.is-mobile{max-width:390px}
             .live-canvas.is-mobile #liveEditable{padding:1rem}
@@ -4083,6 +5044,68 @@ if (($_GET['action'] ?? '') === 'live_editor') {
             .live-modal-box{width:min(560px,100%);background:#111827;border:1px solid rgba(255,255,255,.12);border-radius:20px;padding:1rem;box-shadow:0 30px 90px rgba(0,0,0,.45)}
             .live-modal-box h3{margin-top:0}
             .live-modal-actions{display:flex;gap:.5rem;justify-content:flex-end;margin-top:1rem;flex-wrap:wrap}
+
+            /* RESPONSIVE / FRIENDLY LIVE EDITOR */
+            .live-topbar{gap:.75rem;position:sticky;top:0;z-index:20}
+            .live-title{min-width:0}
+            .live-title span{display:block;font-size:1rem}
+            .live-title small{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:60vw}
+            .live-actions{display:flex;gap:.4rem;flex-wrap:wrap;align-items:center}
+            .live-toolbar-group{background:rgba(15,23,42,.55);border:1px solid rgba(255,255,255,.08);padding:.35rem;border-radius:14px}
+            .live-panel{position:sticky;top:0;max-height:calc(100vh - 90px);overflow:auto;scrollbar-width:thin}
+            .live-panel h3{font-size:1rem;margin:.75rem 0}
+            .live-field label{font-size:.82rem;color:#cbd5e1}
+            .live-mini-btn{min-height:42px;transition:transform .12s,background .12s}
+            .live-mini-btn:active,.live-btn:active{transform:scale(.98)}
+            .live-btn{min-height:40px;white-space:nowrap}
+            .live-stage{min-width:0}
+            .live-canvas{transition:max-width .2s ease}
+            .live-field input[type="color"]{cursor:pointer}
+            .live-mobile-toggle{display:none}
+
+            @media(max-width:1100px){
+                .live-work{grid-template-columns:300px minmax(0,1fr)}
+                .live-toolbar-group{max-width:100%}
+                .live-title small{max-width:45vw}
+            }
+
+            @media(max-width:900px){
+                .live-topbar{align-items:stretch;flex-direction:column}
+                .live-title small{max-width:100%}
+                .live-actions{width:100%}
+                .live-toolbar-group{width:100%;overflow-x:auto;flex-wrap:nowrap;-webkit-overflow-scrolling:touch}
+                .live-toolbar-group .live-btn,.live-toolbar-group .live-select{flex:0 0 auto}
+                .live-work{grid-template-columns:1fr}
+                .live-panel{position:relative;max-height:none;overflow:visible;border-right:0;border-bottom:1px solid rgba(255,255,255,.1);padding-bottom:1rem}
+                .live-stage{padding:.65rem}
+                #liveEditable{padding:1rem}
+                .live-gallery{max-height:180px;grid-template-columns:repeat(4,1fr)}
+            }
+
+            @media(max-width:600px){
+                .live-shell{font-size:14px}
+                .live-btn{padding:.55rem .65rem;font-size:.8rem}
+                .live-select{max-width:145px;font-size:.8rem}
+                .live-toolbar-sep{display:none}
+                .live-stage{padding:.4rem}
+                .live-canvas{border-radius:12px}
+                .live-gallery{grid-template-columns:repeat(3,1fr)}
+                .live-mini-grid{grid-template-columns:1fr 1fr}
+                .live-modal{padding:.5rem}
+                .live-modal-box{border-radius:16px}
+            }
+
+            @media(max-width:420px){
+                .live-title span{font-size:.9rem}
+                .live-actions .live-btn.light{width:100%}
+                .live-toolbar-group{gap:.25rem}
+                .live-btn{padding:.5rem .55rem}
+                .live-mini-grid{grid-template-columns:1fr}
+            }
+
+            @media(min-width:901px){
+                .live-panel{border-radius:0 0 16px 0}
+            }
 
             @media(max-width:900px){
                 .live-topbar{align-items:flex-start;flex-direction:column}
@@ -4102,18 +5125,58 @@ if (($_GET['action'] ?? '') === 'live_editor') {
             <div class="live-actions">
                 <a class="live-btn light" href="admin.php?tab=pages">← Wróć</a>
 
-<button class="live-btn dark" type="button" onclick="document.execCommand('bold')">B</button>
-                <button class="live-btn dark" type="button" onclick="document.execCommand('italic')"><i>I</i></button>
-                <button class="live-btn dark" type="button" onclick="document.execCommand('formatBlock', false, 'h2')">H2</button>
-                <button class="live-btn dark" type="button" onclick="document.execCommand('formatBlock', false, 'p')">P</button>
-                <button class="live-btn dark" type="button" id="liveLinkBtn">Link</button>
-                <button class="live-btn dark" type="button" id="liveClearBtn">Wyczyść format</button>
-                <button class="live-btn dark" type="button" id="liveUndoBtn">↶ Cofnij</button>
-                <button class="live-btn dark" type="button" id="liveRedoBtn">↷ Ponów</button>
-                <button class="live-btn dark" type="button" data-device="desktop">Desktop</button>
-                <button class="live-btn dark" type="button" data-device="tablet">Tablet</button>
-                <button class="live-btn dark" type="button" data-device="mobile">Mobile</button>
-                <button class="live-btn primary" type="button" id="liveSaveBtn">Zapisz</button>
+<div class="live-toolbar-group">
+                    <button class="live-btn dark" type="button" data-cmd="bold" title="Pogrubienie"><b>B</b></button>
+                    <button class="live-btn dark" type="button" data-cmd="italic" title="Kursywa"><i>I</i></button>
+                    <button class="live-btn dark" type="button" data-cmd="underline" title="Podkreślenie"><u>U</u></button>
+                    <button class="live-btn dark" type="button" data-cmd="strikeThrough" title="Przekreślenie"><s>S</s></button>
+                    <span class="live-toolbar-sep"></span>
+                    <select class="live-select" id="liveBlockFormat" title="Typ tekstu">
+                        <option value="p">Akapit</option>
+                        <option value="h1">H1</option>
+                        <option value="h2">H2</option>
+                        <option value="h3">H3</option>
+                        <option value="h4">H4</option>
+                        <option value="blockquote">Cytat</option>
+                    </select>
+                    <select class="live-select" id="liveFontFamily" title="Czcionka">
+                        <option value="">Czcionka</option>
+                        <option value="Arial">Arial</option>
+                        <option value="Georgia">Georgia</option>
+                        <option value="Verdana">Verdana</option>
+                        <option value="Tahoma">Tahoma</option>
+                        <option value="Trebuchet MS">Trebuchet MS</option>
+                        <option value="monospace">Monospace</option>
+                    </select>
+                    <span class="live-color-wrap" title="Kolor tekstu">A <input type="color" id="liveToolbarColor" value="#111827"></span>
+                    <span class="live-color-wrap" title="Kolor tła tekstu">🖍 <input type="color" id="liveHighlightColor" value="#fff59d"></span>
+                    <span class="live-toolbar-sep"></span>
+                    <button class="live-btn dark" type="button" data-cmd="justifyLeft" title="Do lewej">≡←</button>
+                    <button class="live-btn dark" type="button" data-cmd="justifyCenter" title="Wyśrodkuj">≡</button>
+                    <button class="live-btn dark" type="button" data-cmd="justifyRight" title="Do prawej">→≡</button>
+                    <button class="live-btn dark" type="button" data-cmd="justifyFull" title="Wyjustuj">☰</button>
+                    <span class="live-toolbar-sep"></span>
+                    <button class="live-btn dark" type="button" data-cmd="insertUnorderedList" title="Lista punktowana">• Lista</button>
+                    <button class="live-btn dark" type="button" data-cmd="insertOrderedList" title="Lista numerowana">1. Lista</button>
+                    <button class="live-btn dark" type="button" data-cmd="outdent" title="Zmniejsz wcięcie">←</button>
+                    <button class="live-btn dark" type="button" data-cmd="indent" title="Zwiększ wcięcie">→</button>
+                    <span class="live-toolbar-sep"></span>
+                    <button class="live-btn dark" type="button" id="liveLinkBtn">🔗 Link</button>
+                    <button class="live-btn dark" type="button" id="liveUnlinkBtn">Odłącz</button>
+                    <button class="live-btn dark" type="button" id="liveHrBtn">Linia</button>
+                    <button class="live-btn dark" type="button" id="liveTableBtn">Tabela</button>
+                    <button class="live-btn dark" type="button" id="liveImageUrlBtn">Obraz URL</button>
+                    <button class="live-btn dark" type="button" id="liveClearBtn">Wyczyść format</button>
+                    <button class="live-btn dark" type="button" id="liveUndoBtn">↶ Cofnij</button>
+                    <button class="live-btn dark" type="button" id="liveRedoBtn">↷ Ponów</button>
+                    <button class="live-btn dark" type="button" id="liveHtmlBtn">&lt;/&gt; HTML</button>
+                </div>
+                <div class="live-toolbar-group">
+                    <button class="live-btn dark" type="button" data-device="desktop">Desktop</button>
+                    <button class="live-btn dark" type="button" data-device="tablet">Tablet</button>
+                    <button class="live-btn dark" type="button" data-device="mobile">Mobile</button>
+                    <button class="live-btn primary" type="button" id="liveSaveBtn">💾 Zapisz</button>
+                </div>
             </div>
         </div>
 
@@ -4121,6 +5184,16 @@ if (($_GET['action'] ?? '') === 'live_editor') {
             <aside class="live-panel">
                 <div class="live-hint">
                     Kliknij tekst lub element na stronie i edytuj go bezpośrednio. Zapis tworzy kopię zapasową w <strong>.backups/live-editor</strong>.
+                </div>
+
+                <div class="live-tool-section" style="margin-top:.7rem;">
+                    <h3>Szybkie akcje</h3>
+                    <div class="live-mini-grid">
+                        <button class="live-mini-btn" type="button" data-cmd="bold">B Pogrub</button>
+                        <button class="live-mini-btn" type="button" data-cmd="italic">I Kursywa</button>
+                        <button class="live-mini-btn" type="button" data-cmd="insertUnorderedList">• Lista</button>
+                        <button class="live-mini-btn" type="button" id="liveQuickLink">🔗 Link</button>
+                    </div>
                 </div>
 
                 <h3>Narzędzia elementu</h3>
@@ -4149,9 +5222,46 @@ if (($_GET['action'] ?? '') === 'live_editor') {
                     </select>
                 </div>
 
+                <div class="live-field">
+                    <label>Zaokrąglenie narożników</label>
+                    <select id="liveRadius">
+                        <option value="">Bez zmian</option>
+                        <option value="0">0 px</option>
+                        <option value="6px">6 px</option>
+                        <option value="12px">12 px</option>
+                        <option value="18px">18 px</option>
+                        <option value="24px">24 px</option>
+                        <option value="50%">50%</option>
+                    </select>
+                </div>
+
+                <div class="live-field">
+                    <label>Przezroczystość elementu</label>
+                    <input class="live-range" type="range" id="liveOpacity" min="0.1" max="1" step="0.05" value="1">
+                </div>
+
+                <div class="live-field">
+                    <label>Wyrównanie elementu</label>
+                    <select id="liveElementAlign">
+                        <option value="">Bez zmian</option>
+                        <option value="left">Lewo</option>
+                        <option value="center">Środek</option>
+                        <option value="right">Prawo</option>
+                    </select>
+                </div>
+
                 <div class="live-actions">
                     <button class="live-btn dark" type="button" id="liveApplyStyle">Zastosuj styl</button>
+                    <button class="live-btn dark" type="button" id="liveDuplicateElement">Duplikuj</button>
                     <button class="live-btn danger" type="button" id="liveRemoveElement">Usuń element</button>
+                </div>
+
+                <div class="live-tool-section">
+                    <h3>Pozycja elementu</h3>
+                    <div class="live-mini-grid">
+                        <button class="live-mini-btn" type="button" id="liveMoveUp">↑ W górę</button>
+                        <button class="live-mini-btn" type="button" id="liveMoveDown">↓ W dół</button>
+                    </div>
                 </div>
 
                 <div class="live-tool-section">
@@ -4182,6 +5292,18 @@ if (($_GET['action'] ?? '') === 'live_editor') {
                     <div id="liveEditable" contenteditable="true"><?= $content ?></div>
                 </div>
             </main>
+        </div>
+    </div>
+
+    <div class="live-modal" id="liveHtmlModal">
+        <div class="live-modal-box">
+            <h3>Edytuj HTML zaznaczenia</h3>
+            <p style="color:#94a3b8;">Możesz poprawić kod wybranego elementu. Przy zapisie serwer usunie niebezpieczne znaczniki i atrybuty.</p>
+            <textarea class="live-html-box" id="liveHtmlTextarea"></textarea>
+            <div class="live-modal-actions">
+                <button class="live-btn dark" type="button" id="liveHtmlCancel">Anuluj</button>
+                <button class="live-btn primary" type="button" id="liveHtmlApply">Zastosuj HTML</button>
+            </div>
         </div>
     </div>
 
@@ -4247,14 +5369,46 @@ if (($_GET['action'] ?? '') === 'live_editor') {
             }
         });
 
+        function exec(cmd, value){
+            editable.focus();
+            document.execCommand(cmd, false, value || null);
+            pushHistory();
+        }
+
+        document.querySelectorAll('[data-cmd]').forEach(function(btn){
+            btn.addEventListener('click', function(){ exec(btn.dataset.cmd); });
+        });
+
+        document.getElementById('liveBlockFormat')?.addEventListener('change', function(){
+            if(this.value) exec('formatBlock', this.value);
+        });
+
+        document.getElementById('liveFontFamily')?.addEventListener('change', function(){
+            if(this.value) exec('fontName', this.value);
+        });
+
+        document.getElementById('liveToolbarColor')?.addEventListener('input', function(){
+            exec('foreColor', this.value);
+        });
+
+        document.getElementById('liveHighlightColor')?.addEventListener('input', function(){
+            exec('hiliteColor', this.value);
+        });
+
         document.getElementById('liveApplyStyle').addEventListener('click', function(){
             if (!selected || selected === editable) { setStatus('Najpierw kliknij element.'); return; }
             const color = document.getElementById('liveColor').value;
             const bg = document.getElementById('liveBg').value;
             const fs = document.getElementById('liveFontSize').value;
+            const radius = document.getElementById('liveRadius').value;
+            const opacity = document.getElementById('liveOpacity').value;
+            const align = document.getElementById('liveElementAlign').value;
             if (color) selected.style.color = color;
             if (bg) selected.style.backgroundColor = bg;
             if (fs) selected.style.fontSize = fs;
+            if (radius) selected.style.borderRadius = radius;
+            if (opacity) selected.style.opacity = opacity;
+            if (align) selected.style.textAlign = align;
             pushHistory();
             setStatus('Zastosowano styl elementu.');
         });
@@ -4264,6 +5418,100 @@ if (($_GET['action'] ?? '') === 'live_editor') {
             if (confirm('Usunąć wybrany element?')) {
                 const tmp = selected; selected = null; tmp.remove(); pushHistory(); setStatus('Usunięto element.');
             }
+        });
+
+        document.getElementById('liveDuplicateElement')?.addEventListener('click', function(){
+            if (!selected || selected === editable) { setStatus('Najpierw kliknij element.'); return; }
+            const clone = selected.cloneNode(true);
+            clone.classList.remove('live-selected');
+            selected.parentNode.insertBefore(clone, selected.nextSibling);
+            pushHistory();
+            setStatus('Zduplikowano element.');
+        });
+
+        document.getElementById('liveMoveUp')?.addEventListener('click', function(){
+            if (!selected || selected === editable || !selected.previousElementSibling) { setStatus('Nie można przesunąć elementu wyżej.'); return; }
+            selected.parentNode.insertBefore(selected, selected.previousElementSibling);
+            pushHistory();
+            setStatus('Przesunięto element wyżej.');
+        });
+
+        document.getElementById('liveMoveDown')?.addEventListener('click', function(){
+            if (!selected || selected === editable || !selected.nextElementSibling) { setStatus('Nie można przesunąć elementu niżej.'); return; }
+            selected.parentNode.insertBefore(selected.nextElementSibling, selected);
+            pushHistory();
+            setStatus('Przesunięto element niżej.');
+        });
+
+        document.getElementById('liveUnlinkBtn')?.addEventListener('click', function(){
+            exec('unlink');
+            setStatus('Usunięto link z zaznaczenia.');
+        });
+
+        document.getElementById('liveHrBtn')?.addEventListener('click', function(){
+            exec('insertHorizontalRule');
+            setStatus('Dodano linię poziomą.');
+        });
+
+        document.getElementById('liveTableBtn')?.addEventListener('click', function(){
+            const rows = Math.max(1, Math.min(10, parseInt(prompt('Liczba wierszy:', '3') || '0', 10)));
+            const cols = Math.max(1, Math.min(8, parseInt(prompt('Liczba kolumn:', '3') || '0', 10)));
+            if(!rows || !cols) return;
+            let html = '<table style="width:100%;border-collapse:collapse;margin:1rem 0;"><tbody>';
+            for(let r=0;r<rows;r++){
+                html += '<tr>';
+                for(let c=0;c<cols;c++) html += '<td style="border:1px solid #cbd5e1;padding:.65rem;">' + (r === 0 ? 'Nagłówek' : 'Treść') + '</td>';
+                html += '</tr>';
+            }
+            html += '</tbody></table><p></p>';
+            editable.focus();
+            document.execCommand('insertHTML', false, html);
+            pushHistory();
+            setStatus('Dodano tabelę ' + rows + '×' + cols + '.');
+        });
+
+        document.getElementById('liveImageUrlBtn')?.addEventListener('click', function(){
+            const url = prompt('Adres obrazu:', 'https://');
+            if(!url) return;
+            const alt = prompt('Opis ALT:', 'Obraz') || '';
+            editable.focus();
+            document.execCommand('insertHTML', false, '<img src="' + url.replace(/"/g,'&quot;') + '" alt="' + alt.replace(/"/g,'&quot;') + '" style="max-width:100%;height:auto;border-radius:12px;">');
+            pushHistory();
+            setStatus('Dodano obraz.');
+        });
+
+        document.getElementById('liveHtmlBtn')?.addEventListener('click', function(){
+            if(!selected || selected === editable) { setStatus('Najpierw kliknij element.'); return; }
+            document.getElementById('liveHtmlTextarea').value = selected.outerHTML;
+            document.getElementById('liveHtmlModal').classList.add('open');
+        });
+
+        document.getElementById('liveHtmlCancel')?.addEventListener('click', function(){
+            document.getElementById('liveHtmlModal').classList.remove('open');
+        });
+
+        document.getElementById('liveHtmlApply')?.addEventListener('click', function(){
+            if(!selected || selected === editable) return;
+            const raw = document.getElementById('liveHtmlTextarea').value.trim();
+            if(!raw) return;
+            const wrap = document.createElement('div');
+            wrap.innerHTML = raw;
+            const replacement = wrap.firstElementChild;
+            if(!replacement) { setStatus('Nieprawidłowy HTML.'); return; }
+            selected.replaceWith(replacement);
+            selected = replacement;
+            selected.classList.add('live-selected');
+            document.getElementById('liveHtmlModal').classList.remove('open');
+            pushHistory();
+            setStatus('Zmieniono HTML elementu.');
+        });
+
+        document.getElementById('liveHtmlModal')?.addEventListener('click', function(e){
+            if(e.target === this) this.classList.remove('open');
+        });
+
+        document.getElementById('liveQuickLink')?.addEventListener('click', function(){
+            document.getElementById('liveLinkBtn')?.click();
         });
 
         document.getElementById('liveLinkBtn')?.addEventListener('click', function(){
@@ -5711,6 +6959,9 @@ if (isset($_SESSION['logged_in']) && $_SESSION['logged_in'] === true && (($_GET[
 // Publiczne endpointy czatu – działają bez logowania do panelu
 // ----------------------------------------------------------------------
 $public_action = $_POST['action'] ?? $_GET['action'] ?? '';
+if ($public_action === 'spidercms_user_session') {
+    chat_send_json(['ok' => true, 'session' => spidercms_get_or_create_user_session($_POST['name'] ?? '', $_POST['email'] ?? '')]);
+}
 if ($public_action === 'chat_public_send') {
     chat_send_json(chat_public_add_message($_POST['name'] ?? '', $_POST['email'] ?? '', $_POST['message'] ?? '', $_POST['website'] ?? ''));
 }
@@ -5723,7 +6974,7 @@ if ($public_action === 'stats_track') {
 
 
 // ----------------------------------------------------------------------
-// Obsługa resetu hasła z ekranu logowania
+// Obsługa resetu hasła DEMO z ekranu logowania
 // ----------------------------------------------------------------------
 $reset_notice = '';
 $reset_error = '';
@@ -5755,8 +7006,8 @@ if (!empty($_GET['reset_token']) && (!isset($_SESSION['logged_in']) || $_SESSION
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Reset hasła – SpiderCMS</title>
-        <link rel="icon" type="image/png" href="/assets/images/spidercms-icon.png">
+        <title>Reset hasła – SpiderCMS DEMO</title>
+        <link rel="icon" type="image/png" href="/demo/assets/images/spidercms-icon.png">
         <style>
             body{font-family:system-ui,sans-serif;background:linear-gradient(135deg,#0f172a,#1e293b);display:flex;justify-content:center;align-items:center;min-height:100vh;margin:0;}
             .card{background:#1e293b;padding:2.5rem 2.2rem;border-radius:14px;box-shadow:0 10px 40px rgba(0,0,0,0.4);width:100%;max-width:420px;border:1px solid #334155;color:#f8fafc;}
@@ -5771,8 +7022,7 @@ if (!empty($_GET['reset_token']) && (!isset($_SESSION['logged_in']) || $_SESSION
     </head>
     <body>
         <div class="card">
-            <h1>Reset hasła</h1>
-
+            <h1>Reset hasła DEMO</h1>
             <?php if ($reset_notice): ?>
                 <div class="success"><?= e($reset_notice) ?></div>
                 <a class="btn" href="admin.php">Wróć do logowania</a>
@@ -5800,20 +7050,13 @@ if (($_GET['forgot'] ?? '') === '1' && (!isset($_SESSION['logged_in']) || $_SESS
         $reset = spidercms_password_reset_create_token($_POST['reset_login']);
         spidercms_log_action('password_reset_request', $reset ? 'success' : 'warning', ['login' => $_POST['reset_login'] ?? '']);
 
-        // Zawsze pokazujemy neutralny komunikat, żeby nie ujawniać, czy konto istnieje.
         $reset_notice = 'Jeżeli konto istnieje, przygotowano link resetu hasła.';
 
-        if ($reset && !empty($reset['user']['email'])) {
-            $sent = spidercms_password_reset_send_email($reset['user']['email'], $reset['url'], $reset['user']['username'] ?? '');
-            if (!$sent) {
-                $reset_notice .= ' Nie udało się wysłać e-maila przez funkcję mail(). Link awaryjny zapisano w pliku .users/password_reset_last.txt.';
-                @file_put_contents(SPIDERCMS_ADMIN_USERS_DIR . '/password_reset_last.txt', $reset['url'], LOCK_EX);
-                @chmod(SPIDERCMS_ADMIN_USERS_DIR . '/password_reset_last.txt', 0640);
-            }
-        } elseif ($reset) {
-            $reset_notice .= ' Konto nie ma adresu e-mail, więc link awaryjny zapisano w pliku .users/password_reset_last.txt.';
-            @file_put_contents(SPIDERCMS_ADMIN_USERS_DIR . '/password_reset_last.txt', $reset['url'], LOCK_EX);
-            @chmod(SPIDERCMS_ADMIN_USERS_DIR . '/password_reset_last.txt', 0640);
+        if ($reset) {
+            // W wersji DEMO nie wysyłamy maili. Link zapisujemy lokalnie.
+            @file_put_contents(SPIDERCMS_USER_SESSIONS_DIR . '/password_reset_last.txt', $reset['url'], LOCK_EX);
+            @chmod(SPIDERCMS_USER_SESSIONS_DIR . '/password_reset_last.txt', 0640);
+            $reset_notice .= ' W wersji DEMO link awaryjny zapisano w pliku .users/password_reset_last.txt.';
         }
     }
     ?>
@@ -5822,8 +7065,8 @@ if (($_GET['forgot'] ?? '') === '1' && (!isset($_SESSION['logged_in']) || $_SESS
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Nie pamiętasz hasła? – SpiderCMS</title>
-        <link rel="icon" type="image/png" href="/assets/images/spidercms-icon.png">
+        <title>Nie pamiętasz hasła? – SpiderCMS DEMO</title>
+        <link rel="icon" type="image/png" href="/demo/assets/images/spidercms-icon.png">
         <style>
             body{font-family:system-ui,sans-serif;background:linear-gradient(135deg,#0f172a,#1e293b);display:flex;justify-content:center;align-items:center;min-height:100vh;margin:0;}
             .card{background:#1e293b;padding:2.5rem 2.2rem;border-radius:14px;box-shadow:0 10px 40px rgba(0,0,0,0.4);width:100%;max-width:420px;border:1px solid #334155;color:#f8fafc;}
@@ -5843,7 +7086,7 @@ if (($_GET['forgot'] ?? '') === '1' && (!isset($_SESSION['logged_in']) || $_SESS
                 <div class="success"><?= e($reset_notice) ?></div>
                 <a class="btn" href="admin.php">Wróć do logowania</a>
             <?php else: ?>
-                <p>Podaj login lub adres e-mail konta. Jeśli konto istnieje, zostanie utworzony link resetu hasła ważny przez 1 godzinę.</p>
+                <p>Podaj login albo e-mail konta. Link resetu będzie ważny przez 1 godzinę.</p>
                 <form method="post">
                     <input type="text" name="reset_login" placeholder="Login lub e-mail" required autofocus>
                     <button type="submit">Zresetuj hasło</button>
@@ -5858,6 +7101,54 @@ if (($_GET['forgot'] ?? '') === '1' && (!isset($_SESSION['logged_in']) || $_SESS
 }
 
 
+
+// ----------------------------------------------------------------------
+// Diagnostyka statystyk DEMO: admin.php?stats_check=1
+// ----------------------------------------------------------------------
+if (isset($_GET['stats_check']) && $_GET['stats_check'] === '1') {
+    if (!isset($_SESSION['logged_in']) || $_SESSION['logged_in'] !== true) {
+        http_response_code(403);
+        exit('Brak autoryzacji.');
+    }
+    header('Content-Type: text/plain; charset=utf-8');
+    echo "SpiderCMS DEMO stats check\n";
+    echo "enabled: " . (($stats_settings['enabled'] ?? '1') === '1' ? 'yes' : 'no') . "\n";
+    echo "ignore_admin: " . (($stats_settings['ignore_admin'] ?? '1') === '1' ? 'yes' : 'no') . "\n";
+    echo "stats_dir: " . $stats_dir . "\n";
+    echo "stats_dir_exists: " . (is_dir($stats_dir) ? 'yes' : 'no') . "\n";
+    echo "stats_dir_writable: " . (is_writable($stats_dir) ? 'yes' : 'no') . "\n";
+    echo "widget_exists: " . (file_exists(__DIR__ . '/stats-widget.php') ? 'yes' : 'no') . "\n";
+    echo "pages_synced_now: " . (function_exists('stats_sync_widget_in_pages') ? stats_sync_widget_in_pages() : 0) . "\n";
+    echo "visits_file_exists: " . (file_exists($stats_dir . '/visits_daily.json') ? 'yes' : 'no') . "\n";
+    echo "recent_file_exists: " . (file_exists($stats_dir . '/recent.json') ? 'yes' : 'no') . "\n";
+    exit;
+}
+
+
+// ----------------------------------------------------------------------
+// Diagnostyka aktualizacji DEMO: admin.php?update_check_debug=1
+// ----------------------------------------------------------------------
+if (isset($_GET['update_check_debug']) && $_GET['update_check_debug'] === '1') {
+    if (!isset($_SESSION['logged_in']) || $_SESSION['logged_in'] !== true) {
+        http_response_code(403);
+        exit('Brak autoryzacji.');
+    }
+    $update = spidercms_check_update(true);
+    header('Content-Type: text/plain; charset=utf-8');
+    echo "SpiderCMS DEMO update check\n";
+    echo "current_version: " . SPIDERCMS_VERSION . "\n";
+    echo "update_url: " . SPIDERCMS_UPDATE_URL . "\n";
+    echo "cache_file: " . SPIDERCMS_UPDATE_CACHE_FILE . "\n";
+    echo "cache_exists: " . (file_exists(SPIDERCMS_UPDATE_CACHE_FILE) ? 'yes' : 'no') . "\n";
+    echo "update_available: " . (is_array($update) ? 'yes' : 'no') . "\n";
+    if (is_array($update)) {
+        echo "latest_version: " . ($update['latest_version'] ?? '') . "\n";
+        echo "download_url: " . ($update['download_url'] ?? '') . "\n";
+        echo "sha256: " . ($update['sha256'] ?? '') . "\n";
+    }
+    exit;
+}
+
 // ----------------------------------------------------------------------
 // Ekran logowania
 // ----------------------------------------------------------------------
@@ -5867,11 +7158,13 @@ if (!isset($_SESSION['logged_in']) || $_SESSION['logged_in'] !== true) {
         if ($spidercms_login_user !== false) {
             spidercms_log_action('login_success', 'success');
             spidercms_security_log('login_success');
+            session_regenerate_id(true);
             $_SESSION['logged_in'] = true;
             $_SESSION['admin_user_id'] = $spidercms_login_user['id'] ?? '';
             $_SESSION['admin_username'] = $spidercms_login_user['username'] ?? 'admin';
             $_SESSION['admin_display_name'] = $spidercms_login_user['display_name'] ?? ($_SESSION['admin_username'] ?? 'admin');
             $_SESSION['admin_user_role'] = $spidercms_login_user['role'] ?? 'admin';
+            $_SESSION['admin_session_created_at'] = time();
             $_SESSION['last_activity'] = time();
             $_SESSION['login_attempts'] = 0;
             $_SESSION['login_block_until'] = 0;
@@ -5928,9 +7221,7 @@ if (!isset($_SESSION['logged_in']) || $_SESSION['logged_in'] !== true) {
                     <input type="password" name="password" placeholder="Hasło" required autocomplete="current-password">
                     <button type="submit">Zaloguj się</button>
                 </form>
-                    <p style="text-align:center;margin:.9rem 0 0;">
-                        <a href="admin.php?forgot=1" style="color:#c084fc;text-decoration:none;font-weight:600;">Nie pamiętasz hasła?</a>
-                    </p>
+                <p style="text-align:center;margin:.9rem 0 0;"><a href="admin.php?forgot=1" style="color:#c084fc;text-decoration:none;font-weight:600;">Nie pamiętasz hasła?</a></p>
             <?php else: ?>
                 <p style="text-align:center; margin-top:1.5rem;">Spróbuj ponownie za chwilę.</p>
             <?php endif; ?>
@@ -5943,6 +7234,12 @@ if (!isset($_SESSION['logged_in']) || $_SESSION['logged_in'] !== true) {
 // ----------------------------------------------------------------------
 // Panel zalogowany
 // ----------------------------------------------------------------------
+
+if (isset($_GET['force_update_check']) && $_GET['force_update_check'] === '1' && empty($_GET['tab'])) {
+    header('Location: admin.php?tab=ustawienia&force_update_check=1');
+    exit;
+}
+
 $tab = $_GET['tab'] ?? 'dashboard';
 
 if ($tab === 'ustawienia' && !spidercms_admin_can_access_settings()) {
@@ -5954,6 +7251,25 @@ if ($tab === 'ustawienia' && !spidercms_admin_can_access_settings()) {
     $tab = 'dashboard';
 }
 $spidercms_is_page_edit_mode = isset($_GET['edit']) || isset($_GET['edit_page']) || (($_GET['action'] ?? '') === 'edit') || (($_GET['mode'] ?? '') === 'edit');
+
+// Sesyjne strony demo: sprzątanie po 10 minutach braku aktywności.
+spidercms_cleanup_expired_session_pages();
+$previous_activity = (int)($_SESSION['last_activity'] ?? time());
+if ((time() - $previous_activity) > SPIDERCMS_SESSION_PAGE_TTL) {
+    spidercms_delete_pages_for_session_key(spidercms_current_session_key(), 'inactive_10_minutes_current_session');
+    $_SESSION = [];
+    session_destroy();
+    header('Location: admin.php?expired=1');
+    exit;
+}
+$_SESSION['last_activity'] = time();
+spidercms_touch_current_session_pages();
+
+if (($_GET['spidercms_session_ping'] ?? '') === '1') {
+    header('Content-Type: application/json; charset=utf-8');
+    echo json_encode(['ok' => true, 'ttl' => SPIDERCMS_SESSION_PAGE_TTL], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    exit;
+}
 
 // ----------------------------------------------------------------------
 // Eksport logów akcji administratora
@@ -5985,6 +7301,83 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     verify_csrf_or_die();
     spidercms_log_action($action !== '' ? $action : 'unknown_post', 'info', $_POST);
 
+    if ($action === 'install_theme_zip') {
+        spidercms_admin_require_role(['admin']);
+        $result = spidercms_theme_install_zip($_FILES['theme_zip'] ?? null);
+        if (!empty($result['ok'])) {
+            spidercms_log_action('install_theme_zip', 'success', ['theme' => $result['slug'] ?? '']);
+            $toast = ['type'=>'success','msg'=>$result['msg'] ?? 'Motyw został zainstalowany.'];
+        } else {
+            spidercms_log_action('install_theme_zip', 'error', ['error' => $result['msg'] ?? '']);
+            $toast = ['type'=>'error','msg'=>$result['msg'] ?? 'Nie udało się zainstalować motywu.'];
+        }
+    }
+
+    if ($action === 'activate_theme') {
+        spidercms_admin_require_role(['admin']);
+        $themeSlug = spidercms_theme_slug($_POST['theme'] ?? '');
+        if (spidercms_theme_set_active($themeSlug)) {
+            spidercms_log_action('activate_theme', 'success', ['theme' => $themeSlug]);
+            $toast = ['type'=>'success','msg'=>'Motyw został aktywowany i dodany do stron.'];
+        } else {
+            spidercms_log_action('activate_theme', 'error', ['theme' => $themeSlug]);
+            $toast = ['type'=>'error','msg'=>'Nie udało się aktywować motywu.'];
+        }
+    }
+
+
+    if ($action === 'deactivate_theme') {
+        spidercms_admin_require_role(['admin']);
+        $removed = spidercms_theme_deactivate();
+        spidercms_log_action('deactivate_theme', 'success', ['updated_files' => $removed]);
+        $toast = ['type'=>'success','msg'=>'Motyw został wyłączony. Usunięto loader motywu ze stron: ' . (int)$removed];
+    }
+
+    if ($action === 'delete_theme') {
+        spidercms_admin_require_role(['admin']);
+        $themeSlug = spidercms_theme_slug($_POST['theme'] ?? '');
+        if ($themeSlug !== '' && $themeSlug !== spidercms_theme_active_slug()) {
+            if (spidercms_theme_delete_dir(SPIDERCMS_THEMES_DIR . '/' . $themeSlug)) {
+                spidercms_log_action('delete_theme', 'success', ['theme' => $themeSlug]);
+                $toast = ['type'=>'success','msg'=>'Motyw został usunięty.'];
+            } else {
+                spidercms_log_action('delete_theme', 'error', ['theme' => $themeSlug]);
+                $toast = ['type'=>'error','msg'=>'Nie udało się usunąć motywu.'];
+            }
+        } else {
+            $toast = ['type'=>'error','msg'=>'Nie można usunąć aktywnego motywu.'];
+        }
+    }
+
+
+    if ($action === 'install_online_update') {
+        spidercms_admin_require_role(['admin']);
+        $update = spidercms_check_update(true);
+
+        if (!is_array($update)) {
+            $toast = ['type'=>'error','msg'=>'Nie znaleziono dostępnej aktualizacji.'];
+        } else {
+            $result = spidercms_install_online_update($update);
+            if (!empty($result['ok'])) {
+                spidercms_log_action('install_online_update', 'success', [
+                    'from' => SPIDERCMS_VERSION,
+                    'to' => $update['latest_version'] ?? '',
+                    'backup' => $result['backup'] ?? '',
+                ]);
+                $_SESSION['spidercms_update_success'] = $result['msg'] ?? 'Aktualizacja zakończona.';
+                header('Location: admin.php?updated=1');
+                exit;
+            } else {
+                spidercms_log_action('install_online_update', 'error', [
+                    'error' => $result['msg'] ?? '',
+                    'to' => $update['latest_version'] ?? '',
+                ]);
+                $toast = ['type'=>'error','msg'=>$result['msg'] ?? 'Aktualizacja nie powiodła się.'];
+            }
+        }
+    }
+
+
     if (in_array($action, spidercms_admin_settings_actions(), true) && !spidercms_admin_can_access_settings()) {
         spidercms_log_action('permission_denied_settings_action', 'error', [
             'blocked_action' => $action,
@@ -6004,7 +7397,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $username = spidercms_admin_user_clean_username($_POST['username'] ?? '');
             $password = (string)($_POST['password'] ?? '');
             $exists = false;
-
             foreach ($users as $u) {
                 if (($u['username'] ?? '') === $username) { $exists = true; break; }
             }
@@ -6036,14 +7428,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         if ($action === 'update_admin_user') {
             $id = (string)($_POST['user_id'] ?? '');
             $updated = false;
-
             foreach ($users as &$user) {
                 if (($user['id'] ?? '') !== $id) continue;
 
                 $is_self = (($user['username'] ?? '') === spidercms_admin_current_username());
                 $user['display_name'] = trim((string)($_POST['display_name'] ?? ($user['display_name'] ?? '')));
                 $user['email'] = filter_var($_POST['email'] ?? '', FILTER_VALIDATE_EMAIL) ? trim((string)$_POST['email']) : '';
-
                 if (!$is_self) {
                     $user['role'] = spidercms_admin_user_clean_role($_POST['role'] ?? ($user['role'] ?? 'editor'));
                     $user['active'] = isset($_POST['active']);
@@ -6080,7 +7470,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $current = spidercms_admin_current_username();
             $new = [];
             $deleted = false;
-
             foreach ($users as $user) {
                 if (($user['id'] ?? '') === $id && (($user['username'] ?? '') !== $current)) {
                     $deleted = true;
@@ -6520,14 +7909,20 @@ document.addEventListener('DOMContentLoaded', function(){
     });
 })();
 </script>
+
+
 </body>
 </html>
 PHP;
                 $template = str_replace('__TITLE__', addslashes($title), $template);
                 $template = str_replace('__CONTENT__', $content, $template);
                 $template = str_replace('__ROOT_DEPTH__', (string)$create_pages_depth, $template);
-                file_put_contents($file, $template);
-                $toast = ['type'=>'success', 'msg'=>"Utworzono stronę: " . $create_pages_url . $slug . '.php'];
+                if (file_put_contents($file, $template) !== false) {
+                    spidercms_register_session_page($file, $slug, $create_page_folder);
+                    $toast = ['type'=>'success', 'msg'=>"Utworzono stronę sesyjną: " . $create_pages_url . $slug . '.php . Zostanie usunięta po 10 minutach braku aktywności albo po wylogowaniu.'];
+                } else {
+                    $toast = ['type'=>'error', 'msg'=>'Nie udało się zapisać pliku strony.'];
+                }
             }
         } else {
             $toast = ['type'=>'error', 'msg'=>'Slug i tytuł są wymagane'];
@@ -6535,20 +7930,9 @@ PHP;
     }
     // AKCJA: USTAWIENIE STRONY GŁÓWNEJ
     if ($action === 'set_homepage') {
-        $slug = preg_replace('/[^a-z0-9\-_]+/i', '', trim($_POST['slug'] ?? $_POST['homepage_slug'] ?? ''));
-        $file = ACTIVE_PAGES_DIR . '/' . $slug . '.php';
-        if ($slug === '' || !file_exists($file)) {
-            $toast = ['type'=>'error', 'msg'=>'Nie można ustawić strony głównej – wybrana strona nie istnieje'];
-        } else {
-            file_put_contents(__DIR__ . '/.homepage', $slug);
-            if (write_homepage_redirect($slug)) {
-                $toast = ['type'=>'success', 'msg'=>'Ustawiono stronę główną: ' . $slug . '.php'];
-            } else {
-                $toast = ['type'=>'error', 'msg'=>'Zapisano ustawienie, ale nie udało się utworzyć przekierowania index.php'];
-            }
-        }
-        header('Location: admin.php?tab=ustawienia');
-        exit;
+        // Blokada ochronna: w tej wersji demo nie pozwalamy panelowi zmieniać strony głównej,
+        // bo admin.php znajduje się w tym samym katalogu co prawdziwy index.php witryny.
+        $toast = ['type'=>'error', 'msg'=>'Zmiana strony głównej jest zablokowana. Plik index.php obok admin.php jest chroniony.'];
     }
 
     // AKCJA: EDYCJA STRONY
@@ -6560,11 +7944,15 @@ PHP;
 
         if ($new_slug === '') {
             $toast = ['type'=>'error', 'msg'=>'Slug strony nie może być pusty.'];
+        } elseif (spidercms_is_protected_homepage_slug($old_slug) || spidercms_is_protected_homepage_slug($new_slug)) {
+            $toast = ['type'=>'error', 'msg'=>'Edycja głównego pliku index.php obok admin.php jest zablokowana.'];
         } else {
             $old_file = ACTIVE_PAGES_DIR . '/' . $old_slug . '.php';
             $new_file = ACTIVE_PAGES_DIR . '/' . $new_slug . '.php';
 
-            if (!file_exists($old_file)) {
+            if (spidercms_is_protected_page_file($old_file) || spidercms_is_protected_page_file($new_file)) {
+                $toast = ['type'=>'error', 'msg'=>'Edycja głównego pliku index.php obok admin.php jest zablokowana.'];
+            } elseif (!file_exists($old_file)) {
                 $toast = ['type'=>'error', 'msg'=>'Strona źródłowa nie istnieje.'];
             } elseif ($new_slug !== $old_slug && file_exists($new_file)) {
                 $toast = ['type'=>'error', 'msg'=>'Nie można zmienić sluga. Plik ' . $new_slug . '.php już istnieje.'];
@@ -6578,6 +7966,7 @@ PHP;
                     }
 
                     if (file_put_contents($new_file, $updated, LOCK_EX) !== false) {
+                        if (function_exists('stats_sync_widget_in_pages')) stats_sync_widget_in_pages();
                         if ($new_slug !== $old_slug && file_exists($old_file)) {
                             @unlink($old_file);
                         }
@@ -6598,13 +7987,10 @@ PHP;
     // AKCJA: USUWANIE STRONY
     if ($action === 'delete') {
         $slug = trim($_POST['slug'] ?? '');
-        global $homepage_slug;
-        if ($slug === $homepage_slug) {
-            $toast = ['type'=>'error', 'msg'=>'Nie można usunąć aktywnej strony głównej. Najpierw ustaw inną stronę jako główną.'];
-        } elseif ($slug === 'index') {
-            $toast = ['type'=>'error', 'msg'=>'Nie można usunąć podstawowej strony index'];
+        $file = ACTIVE_PAGES_DIR . '/' . $slug . '.php';
+        if (spidercms_is_protected_page_file($file)) {
+            $toast = ['type'=>'error', 'msg'=>'Nie można usunąć głównego pliku index.php obok admin.php.'];
         } else {
-            $file = ACTIVE_PAGES_DIR . '/' . $slug . '.php';
             if (file_exists($file) && unlink($file)) {
                 $toast = ['type'=>'success', 'msg'=>'Strona usunięta'];
             } else {
@@ -6620,6 +8006,8 @@ PHP;
 
         if ($slug === '' || !file_exists($source_file)) {
             $toast = ['type'=>'error', 'msg'=>'Nie można zduplikować strony, ponieważ plik źródłowy nie istnieje.'];
+        } elseif (spidercms_is_protected_page_file($source_file)) {
+            $toast = ['type'=>'error', 'msg'=>'Duplikowanie głównego pliku index.php obok admin.php jest zablokowane.'];
         } else {
             $base_slug = $slug . '-kopia';
             $new_slug = $base_slug;
@@ -7101,6 +8489,10 @@ PHP;
         $new_header_height = trim($_POST['header_height'] ?? '');
         $new_logo_height = trim($_POST['logo_height'] ?? '');
         $new_content_width = trim($_POST['content_width'] ?? '');
+        $new_content_width_preset = trim($_POST['content_width_preset'] ?? '');
+        if ($new_content_width_preset !== '' && preg_match('/^(960|1100|1240|1440|1600)$/', $new_content_width_preset)) {
+            $new_content_width = $new_content_width_preset;
+        }
         $new_border_radius = trim($_POST['border_radius'] ?? '');
         $new_shadow_enabled = !empty($_POST['shadow_enabled']) ? '1' : '0';
         $new_menu_position = $_POST['menu_position'] ?? theme_value('menu-position', 'right');
@@ -7191,31 +8583,12 @@ header('Location: admin.php?tab=ustawienia');
         }
     }
 
-    // === NOWA AKCJA: ZMIANA HASŁA ===
+    // === AKCJA WYŁĄCZONA: ZMIANA HASŁA ===
     if ($action === 'change_password') {
-        $old_password = $_POST['old_password'] ?? '';
-        $new_password = $_POST['new_password'] ?? '';
-        $confirm_password = $_POST['confirm_password'] ?? '';
-
-        if (empty($old_password) || empty($new_password) || empty($confirm_password)) {
-            $toast = ['type' => 'error', 'msg' => 'Wszystkie pola są wymagane'];
-        } elseif ($new_password !== $confirm_password) {
-            $toast = ['type' => 'error', 'msg' => 'Nowe hasło i potwierdzenie nie są identyczne'];
-        } elseif (strlen($new_password) < 6) {
-            $toast = ['type' => 'error', 'msg' => 'Nowe hasło musi mieć minimum 6 znaków'];
-        } elseif (!password_verify($old_password, $ADMIN_HASH)) {
-            $toast = ['type' => 'error', 'msg' => 'Stare hasło jest nieprawidłowe'];
-        } else {
-            $new_hash = password_hash($new_password, PASSWORD_ARGON2ID);
-            if (file_put_contents($hash_file, $new_hash) !== false) {
-                chmod($hash_file, 0600);
-                $ADMIN_HASH = $new_hash; // aktualizacja w bieżącej sesji
-                $toast = ['type' => 'success', 'msg' => 'Hasło zostało pomyślnie zmienione'];
-            } else {
-                $toast = ['type' => 'error', 'msg' => 'Błąd zapisu nowego hasła'];
-            }
-        }
+        spidercms_log_action('change_password', 'warning', ['blocked' => 'disabled_in_panel']);
+        $toast = ['type' => 'error', 'msg' => 'Zmiana hasła z poziomu panelu została zablokowana. Hasło można zmienić tylko przez podmianę pliku .admin_hash na serwerze.'];
     }
+
 
 
 
@@ -7482,6 +8855,10 @@ if (!in_array($homepage_slug, $page_slugs, true)) {
 $edit_slug = spidercms_clean_slug($_GET['edit'] ?? '');
 $edit_content = '';
 $edit_title = '';
+if ($edit_slug && spidercms_is_protected_page_file(ACTIVE_PAGES_DIR . '/' . $edit_slug . '.php')) {
+    $toast = ['type'=>'error', 'msg'=>'Edycja głównego pliku index.php obok admin.php jest zablokowana.'];
+    $edit_slug = '';
+}
 if ($edit_slug && file_exists($f = ACTIVE_PAGES_DIR . '/' . $edit_slug . '.php')) {
     $raw = file_get_contents($f);
     $edit_title = spidercms_page_get_title_from_source($raw, $edit_slug);
@@ -7507,17 +8884,8 @@ function render_editor_tools() {
         <div class="editor-note">Kliknięcie wstawia gotowy blok w miejscu kursora w edytorze. Bloki możesz później dowolnie edytować w TinyMCE.</div>
     </div>
 
-    <div class="editor-tools editor-page-presets">
-        <h3><i class="fa-solid fa-layer-group"></i> Gotowe presety stron</h3>
-        <div class="editor-tool-grid">
-            <button type="button" class="editor-tool-btn page-preset-btn" data-page-preset="contact"><i class="fa-solid fa-address-book"></i> Kontakt</button>
-            <button type="button" class="editor-tool-btn page-preset-btn" data-page-preset="about"><i class="fa-solid fa-circle-info"></i> O nas</button>
-            <button type="button" class="editor-tool-btn page-preset-btn" data-page-preset="offer"><i class="fa-solid fa-briefcase"></i> Oferta</button>
-            <button type="button" class="editor-tool-btn page-preset-btn" data-page-preset="services"><i class="fa-solid fa-screwdriver-wrench"></i> Usługi</button>
-            <button type="button" class="editor-tool-btn page-preset-btn" data-page-preset="landing"><i class="fa-solid fa-bullhorn"></i> Landing Page</button>
-            <button type="button" class="editor-tool-btn page-preset-btn" data-page-preset="faqpage"><i class="fa-solid fa-circle-question"></i> FAQ / Pomoc</button>
-        </div>
-        <div class="editor-note">Preset strony zastępuje aktualną treść edytora gotowym, stylowym układem. Przy tworzeniu nowej strony automatycznie podpowie też tytuł i slug.</div>
+    
+
     </div>
     <?php
 }
@@ -8336,6 +9704,18 @@ section[data-spidercms-purpose="create-page"]{
 </style>
 <?php endif; ?>
 
+
+<style>
+/* SpiderCMS DEMO cumulative layout fixes */
+.page-actions, .actions-cell, td.page-actions{display:flex!important;flex-wrap:wrap!important;gap:10px!important;align-items:stretch!important;justify-content:flex-start!important;}
+.page-actions .btn,.page-actions a,.page-actions button,.actions-cell .btn,.actions-cell a,.actions-cell button,td.page-actions .btn,td.page-actions a,td.page-actions button{min-width:155px!important;height:54px!important;min-height:54px!important;display:inline-flex!important;align-items:center!important;justify-content:center!important;gap:8px!important;padding:0 18px!important;border-radius:12px!important;font-size:15px!important;font-weight:800!important;line-height:1!important;white-space:nowrap!important;box-sizing:border-box!important;margin:0!important;text-align:center!important;}
+.page-actions form,.actions-cell form,td.page-actions form{display:inline-flex!important;margin:0!important;padding:0!important;align-items:stretch!important;}
+#content_width,#content_width_preset,#border_radius,#header_height,#logo_height,#font_family,select[name="content_width_preset"]{width:100%!important;max-width:100%!important;height:54px!important;min-height:54px!important;box-sizing:border-box!important;display:block!important;}
+#content_width_preset{padding:0 44px 0 18px!important;line-height:54px!important;}
+.settings-grid,.settings-section,.theme-grid,.form-grid{align-items:start!important;}.settings-grid>div,.settings-section>div,.theme-grid>div,.form-grid>div{min-width:0!important;}
+.stats-popular-card table{display:block!important;width:100%!important;}.stats-popular-card thead{display:none!important;}.stats-popular-card tbody{display:flex!important;flex-direction:column!important;gap:14px!important;}.stats-popular-card tbody tr{display:grid!important;grid-template-columns:minmax(0,1fr) 90px 180px 140px!important;align-items:center!important;background:rgba(255,255,255,.02)!important;border:1px solid rgba(255,255,255,.06)!important;border-radius:14px!important;padding:16px!important;}.stats-popular-card td{border:none!important;padding:0 10px!important;min-width:0!important;}.stats-popular-card td:nth-child(2){text-align:center!important;font-size:28px!important;font-weight:800!important;}.stats-popular-card td:last-child{display:flex!important;justify-content:flex-end!important;}.stats-popular-card .btn{width:130px!important;height:46px!important;min-width:130px!important;white-space:nowrap!important;}
+@media(max-width:850px){.stats-popular-card tbody tr{grid-template-columns:1fr!important;gap:10px!important}.stats-popular-card td{text-align:left!important}.stats-popular-card td:last-child{justify-content:flex-start!important}.stats-popular-card .btn{width:100%!important}.page-actions .btn,.page-actions a,.page-actions button{min-width:100%!important;width:100%!important}}
+</style>
 </head>
 <body>
 <div class="spidercms-mobile-topbar">
@@ -8371,13 +9751,16 @@ section[data-spidercms-purpose="create-page"]{
         <a href="admin.php?tab=menu" class="<?= $tab === 'menu' ? 'active menu-tab' : 'menu-tab' ?>"><i class="fa-solid fa-bars"></i> Menu i podmenu</a>
         <a href="admin.php?tab=stopka" class="<?= $tab === 'stopka' ? 'active footer-tab' : 'footer-tab' ?>"><i class="fa-solid fa-shoe-prints"></i> Stopka</a>
         <a href="admin.php?tab=ustawienia&settings=general" class="<?= $tab === 'ustawienia' ? 'active settings-tab' : 'settings-tab' ?>"><i class="fa-solid fa-gear"></i> Ustawienia globalne</a>
+        <a href="admin.php?tab=themes" class="<?= $tab === 'themes' ? 'active' : '' ?>" style="color:#c084fc;"><i class="fa-solid fa-palette"></i> Skórki / Themes</a>
 
         <div class="nav-section-title">Komunikacja</div>
         <a href="admin.php?tab=chat" class="<?= $tab === 'chat' ? 'active' : '' ?>" style="color:#22c55e;"><i class="fa-solid fa-comments"></i> Chat <?php if (($chat_unread ?? 0) > 0): ?><span class="chat-unread-badge"><?= (int)$chat_unread ?></span><?php endif; ?></a>
+        <a href="admin.php?tab=bookings" class="<?= $tab === 'bookings' ? 'active' : '' ?>" style="color:#fb923c;"><i class="fa-solid fa-calendar-check"></i> Rezerwacje</a>
         <a href="admin.php?tab=ustawienia&settings=social" class="<?= ($tab === 'ustawienia' && ($_GET['settings'] ?? '') === 'social') ? 'active settings-tab' : 'settings-tab' ?>"><i class="fa-solid fa-share-nodes"></i> Social Media</a>
 
         <div class="nav-section-title">Analityka i system</div>
         <a href="admin.php?tab=statystyki" class="<?= $tab === 'statystyki' ? 'active' : '' ?>" style="color:#38bdf8;"><i class="fa-solid fa-chart-line"></i> Statystyki</a>
+        <a href="admin.php?tab=uzytkownicy" class="<?= $tab === 'uzytkownicy' ? 'active' : '' ?>"><i class="fa-solid fa-users-gear"></i> Użytkownicy</a>
         <a href="admin.php?tab=logi" class="<?= $tab === 'logi' ? 'active' : '' ?>" style="color:#f97316;"><i class="fa-solid fa-list-check"></i> Logi akcji</a>
         <a href="admin.php?tab=ustawienia&settings=security" class="<?= ($tab === 'ustawienia' && ($_GET['settings'] ?? '') === 'security') ? 'active settings-tab' : 'settings-tab' ?>"><i class="fa-solid fa-shield-halved"></i> Bezpieczeństwo</a>
         <a href="admin.php?tab=o-cms" class="<?= $tab === 'o-cms' ? 'active about-tab' : 'about-tab' ?>"><i class="fa-solid fa-info-circle"></i> O CMS</a>
@@ -8393,7 +9776,9 @@ section[data-spidercms-purpose="create-page"]{
                 case 'menu': echo 'Konfiguracja górnego menu'; break;
                 case 'stopka': echo 'Konfiguracja stopki witryny'; break;
                 case 'ustawienia': echo 'Ustawienia witryny'; break;
+                case 'themes': echo 'Skórki / Themes'; break;
                 case 'chat': echo 'Chat z odwiedzającymi'; break;
+                case 'bookings': echo 'Rezerwacje'; break;
                 case 'slider': echo 'Slider zdjęć i shortcode'; break;
                 case 'statystyki': echo 'Statystyki odwiedzin'; break;
                 case 'logi': echo 'Logi akcji systemu'; break;
@@ -8409,6 +9794,10 @@ section[data-spidercms-purpose="create-page"]{
         </a>
         <?php endif; ?>
     </header>
+        <?php /* SPIDERCMS_GLOBAL_UPDATE_NOTICE */ ?>
+        <?= spidercms_update_notice_html() ?>
+        <?= spidercms_update_forced_result_html() ?>
+
     <?php if ($toast['msg']): ?>
         <div class="toast <?= $toast['type'] ?>"><?= htmlspecialchars($toast['msg']) ?></div>
     <?php endif; ?>
@@ -8463,10 +9852,6 @@ section[data-spidercms-purpose="create-page"]{
                     <a href="admin.php?tab=ustawienia" class="btn btn-edit" style="text-align:center; justify-content:center;">
                         <i class="fa-solid fa-palette"></i> Zmień kolory / logo
                     </a>
-                    <a href="admin.php?tab=uzytkownicy" class="btn btn-edit" style="text-align:center; justify-content:center;">
-                        <i class="fa-solid fa-users-gear"></i> Użytkownicy
-                    </a>
-
                 </div>
             </div>
         </div>
@@ -8475,7 +9860,7 @@ section[data-spidercms-purpose="create-page"]{
         <?php if (!spidercms_admin_has_role(['admin'])): ?>
             <div class="toast error">Brak uprawnień. Tylko Administrator może zarządzać użytkownikami.</div>
         <?php else: ?>
-            <?= spidercms_admin_users_tab_html() ?>
+            <?= spidercms_admin_users_tab_html($toast) ?>
         <?php endif; ?>
     <?php elseif ($tab === 'stopka'): ?>
         <div class="card">
@@ -8714,6 +10099,10 @@ section[data-spidercms-purpose="create-page"]{
         </div>
     </div>
 		
+    <?php elseif ($tab === 'themes'): ?>
+        <?php spidercms_admin_require_role(['admin']); ?>
+        <?= spidercms_themes_tab_html() ?>
+
     <?php elseif ($tab === 'chat'): ?>
         <?php
         uasort($chat_conversations, function($a, $b) {
@@ -8983,6 +10372,18 @@ section[data-spidercms-purpose="create-page"]{
         </div>
 
     <?php elseif ($tab === 'ustawienia'): ?>
+
+<div class="card" style="margin-bottom:1rem;">
+    <h3><i class="fa-solid fa-arrows-rotate"></i> Aktualizacje DEMO</h3>
+    <p>Ręczne sprawdzenie dostępności nowej wersji SpiderCMS DEMO.</p>
+    <a class="btn btn-view" href="admin.php?tab=ustawienia&force_update_check=1">
+        <i class="fa-solid fa-arrows-rotate"></i> Sprawdź aktualizacje
+    </a>
+    <a class="btn btn-view" href="admin.php?update_check_debug=1" target="_blank" rel="noopener">
+        <i class="fa-solid fa-bug"></i> Diagnostyka aktualizacji
+    </a>
+</div>
+
         <div class="card card-settings settings-tabs-card">
             <div class="settings-header-row">
                 <div>
@@ -9154,13 +10555,13 @@ section[data-spidercms-purpose="create-page"]{
                         </div>
                         <div>
                             <label for="content_width_preset">Szybki wybór szerokości</label>
-                            <select id="content_width_preset">
+                            <select id="content_width_preset" name="content_width_preset">
                                 <option value="">Wybierz preset...</option>
-                                <option value="960">Wąska – 960 px</option>
-                                <option value="1100">Czytelna – 1100 px</option>
-                                <option value="1240">Standardowa – 1240 px</option>
-                                <option value="1440">Szeroka – 1440 px</option>
-                                <option value="1600">Bardzo szeroka – 1600 px</option>
+                                <option value="960" <?= (string)theme_value('content-width', '1240') === '960' ? 'selected' : '' ?>>Wąska – 960 px</option>
+                                <option value="1100" <?= (string)theme_value('content-width', '1240') === '1100' ? 'selected' : '' ?>>Czytelna – 1100 px</option>
+                                <option value="1240" <?= (string)theme_value('content-width', '1240') === '1240' ? 'selected' : '' ?>>Standardowa – 1240 px</option>
+                                <option value="1440" <?= (string)theme_value('content-width', '1240') === '1440' ? 'selected' : '' ?>>Szeroka – 1440 px</option>
+                                <option value="1600" <?= (string)theme_value('content-width', '1240') === '1600' ? 'selected' : '' ?>>Bardzo szeroka – 1600 px</option>
                             </select>
                         </div>
                         <div><label for="border_radius">Zaokrąglenia [px]</label><input type="text" id="border_radius" name="border_radius" value="<?= htmlspecialchars(theme_value('border-radius', '10')) ?>"></div>
@@ -9265,21 +10666,16 @@ section[data-spidercms-purpose="create-page"]{
             <section class="settings-panel" data-settings-panel="security">
                 <div class="settings-panel-title">
                     <h3><i class="fa-solid fa-shield-halved"></i> Bezpieczeństwo</h3>
-                    <p>Zmiana hasła administratora i podstawowe informacje o zabezpieczeniach panelu.</p>
+                    <p>Sesje użytkowników, sesja administratora i podstawowe informacje o zabezpieczeniach panelu.</p>
                 </div>
-                <div class="settings-security-box spidercms-create-page-only" data-spidercms-purpose="create-page">
-                    <h3 style="margin-top:0; color: #f87171;"><i class="fa-solid fa-key"></i> Zmiana hasła administratora</h3>
-                    <p style="color:#94a3b8; margin-bottom:1.5rem;">Zalecane co 3–6 miesięcy. Wymagane stare hasło.</p>
-                    <form method="post">
-                        <input type="hidden" name="action" value="change_password">
-                        <label for="old_password">Stare hasło</label>
-                        <input type="password" id="old_password" name="old_password" required autocomplete="current-password">
-                        <label for="new_password">Nowe hasło (min. 6 znaków)</label>
-                        <input type="password" id="new_password" name="new_password" required minlength="6" autocomplete="new-password">
-                        <label for="confirm_password">Powtórz nowe hasło</label>
-                        <input type="password" id="confirm_password" name="confirm_password" required minlength="6" autocomplete="new-password">
-                        <div style="margin-top: 1.8rem;"><button type="submit" style="background:#ef4444;">Zmień hasło</button></div>
-                    </form>
+                <div class="settings-security-box">
+                    <h3 style="margin-top:0; color:#22c55e;"><i class="fa-solid fa-user-shield"></i> Sesje użytkowników włączone</h3>
+                    <p style="color:#94a3b8; margin-bottom:1rem;">System nadaje odwiedzającym trwałe ID sesji w ciasteczku <code>spidercms_user_session</code>. Dzięki temu czat i kolejne moduły mogą rozpoznać powracającego użytkownika bez zakładania konta.</p>
+                    <p style="color:#94a3b8; margin-bottom:0;">Dane techniczne sesji są zapisywane w prywatnym pliku <code>.users/sessions.json</code>, zabezpieczonym przed dostępem z przeglądarki.</p>
+                </div>
+                <div class="settings-security-box" style="margin-top:1rem;">
+                    <h3 style="margin-top:0; color:#f87171;"><i class="fa-solid fa-lock"></i> Zmiana hasła zablokowana</h3>
+                    <p style="color:#94a3b8; margin-bottom:0;">Formularz zmiany hasła został usunięty z panelu. Hasło administratora można zmienić wyłącznie ręcznie na serwerze przez podmianę pliku <code>.admin_hash</code>.</p>
                 </div>
             </section>
 
@@ -9576,6 +10972,7 @@ section[data-spidercms-purpose="create-page"]{
         <div class="card">
             <h2>Twoje strony (<?= count($pages) ?>)</h2>
             <p style="color:#94a3b8;margin:0.4rem 0 1rem;">Aktywna strona główna: <strong style="color:#fbbf24;"><?= htmlspecialchars($homepage_slug) ?>.php</strong></p>
+            <p style="color:#fbbf24;margin:0.4rem 0 1rem;">Strony utworzone w tej sesji są tymczasowe: kasują się po 10 minutach braku aktywności albo po kliknięciu „Wyloguj”. Chroniony jest tylko fizyczny plik <code>index.php</code> obok <code>admin.php</code>. Strona ustawiona jako główna w CMS może być edytowana normalnie.</p>
             <table>
                 <thead>
                     <tr><th>Slug / Plik</th><th>Modyfikacja</th><th>Podgląd</th><th>Akcje</th></tr>
@@ -9586,7 +10983,7 @@ section[data-spidercms-purpose="create-page"]{
                     <td>
                         <code><?= htmlspecialchars($page['slug']) ?>.php</code>
                         <?php if ($page['slug'] === $homepage_slug): ?>
-                            <span class="homepage-badge"><i class="fa-solid fa-star"></i> strona główna</span>
+                            <span class="homepage-badge"><i class="fa-solid fa-star"></i> strona startowa CMS</span>
                         <?php elseif ($page['slug'] === 'index'): ?>
                             <span style="color:var(--success);font-size:0.9rem;margin-left:0.6rem;">(index)</span>
                         <?php endif; ?>
@@ -9594,20 +10991,17 @@ section[data-spidercms-purpose="create-page"]{
                     <td><?= $page['modified'] ?></td>
                     <td><a href="<?= htmlspecialchars(ACTIVE_PAGES_URL . $page['slug'] . '.php') ?>" target="_blank" class="btn btn-view"><i class="fa-solid fa-eye"></i> Podgląd</a></td>
                     <td>
-                        <a href="admin.php?tab=strony&edit=<?= urlencode($page['slug']) ?>" class="btn btn-edit"><i class="fa-solid fa-pen-to-square"></i> Edytuj</a>
-                        <form method="post" style="display:inline;">
-                            <input type="hidden" name="action" value="duplicate">
-                            <input type="hidden" name="slug" value="<?= htmlspecialchars($page['slug']) ?>">
-                            <button type="submit" class="btn btn-export"><i class="fa-solid fa-copy"></i> Duplikuj</button>
-                        </form>
-                        <?php if ($page['slug'] !== $homepage_slug): ?>
-                        <form method="post" style="display:inline;">
-                            <input type="hidden" name="action" value="set_homepage">
-                            <input type="hidden" name="slug" value="<?= htmlspecialchars($page['slug']) ?>">
-                            <button type="submit" class="btn btn-homepage"><i class="fa-solid fa-star"></i> Główna</button>
-                        </form>
+                        <?php if (!spidercms_is_protected_page_file(ACTIVE_PAGES_DIR . '/' . $page['slug'] . '.php')): ?>
+                            <a href="admin.php?tab=strony&edit=<?= urlencode($page['slug']) ?>" class="btn btn-edit"><i class="fa-solid fa-pen-to-square"></i> Edytuj</a>
+                            <form method="post" style="display:inline;">
+                                <input type="hidden" name="action" value="duplicate">
+                                <input type="hidden" name="slug" value="<?= htmlspecialchars($page['slug']) ?>">
+                                <button type="submit" class="btn btn-export"><i class="fa-solid fa-copy"></i> Duplikuj</button>
+                            </form>
+                        <?php else: ?>
+                            <span style="display:inline-block;padding:.65rem .9rem;border-radius:8px;background:#334155;color:#cbd5e1;font-weight:700;">Chroniona</span>
                         <?php endif; ?>
-                        <?php if ($page['slug'] !== 'index' && $page['slug'] !== $homepage_slug): ?>
+                        <?php if (!spidercms_is_protected_page_file(ACTIVE_PAGES_DIR . '/' . $page['slug'] . '.php')): ?>
                         <form method="post" style="display:inline;" onsubmit="return confirm('Na pewno usunąć?');">
                             <input type="hidden" name="action" value="delete">
                             <input type="hidden" name="slug" value="<?= htmlspecialchars($page['slug']) ?>">
@@ -10758,28 +12152,25 @@ document.addEventListener('DOMContentLoaded', function(){
 /* SPIDERCMS MOBILE LAYOUT WIDTH FIX END */
 </script>
 
-<!-- Emergency users sidebar injection -->
-
 <script>
-document.addEventListener('DOMContentLoaded', function(){
-    var nav = document.querySelector('#sidebar nav') || document.querySelector('aside nav') || document.querySelector('nav');
-    if (!nav || nav.querySelector('a[href*="tab=uzytkownicy"]')) return;
-
-    var a = document.createElement('a');
-    a.href = 'admin.php?tab=uzytkownicy';
-    a.innerHTML = '<i class="fa-solid fa-users-gear"></i> Użytkownicy';
-    a.style.color = '#c084fc';
-
-    try {
-        if (new URLSearchParams(location.search).get('tab') === 'uzytkownicy') {
-            a.classList.add('active');
-        }
-    } catch(e) {}
-
-    var logi = nav.querySelector('a[href*="tab=logi"]');
-    if (logi) nav.insertBefore(a, logi);
-    else nav.appendChild(a);
-});
+(function(){
+    let dirty = false;
+    let lastPing = 0;
+    const minInterval = 30000;
+    function markActive(){ dirty = true; }
+    ['click','keydown','mousemove','touchstart','scroll'].forEach(function(ev){
+        window.addEventListener(ev, markActive, {passive:true});
+    });
+    function ping(){
+        if(!dirty) return;
+        const now = Date.now();
+        if(now - lastPing < minInterval) return;
+        dirty = false;
+        lastPing = now;
+        fetch('admin.php?spidercms_session_ping=1', {credentials:'same-origin', cache:'no-store'}).catch(function(){});
+    }
+    setInterval(ping, 15000);
+})();
 </script>
 
 
@@ -10798,5 +12189,78 @@ document.addEventListener('DOMContentLoaded', function(){
 });
 </script>
 
+
+
+<?php
+$spidercms_floating_update = function_exists('spidercms_check_update') ? spidercms_check_update(false) : null;
+?>
+<?php if (is_array($spidercms_floating_update)): ?>
+<style>
+.spider-update-floating{position:fixed;right:18px;top:18px;z-index:999999;max-width:370px;background:linear-gradient(135deg,#78350f,#581c87);color:#fff;border:1px solid rgba(250,204,21,.45);box-shadow:0 18px 50px rgba(0,0,0,.35);border-radius:14px;padding:14px 16px;font-family:system-ui,sans-serif}
+.spider-update-floating strong{display:block;margin-bottom:6px;color:#fde68a}
+.spider-update-floating a,.spider-update-floating button{display:inline-flex;align-items:center;gap:.4rem;margin-top:.55rem;margin-right:.35rem;border:0;border-radius:999px;padding:.55rem .8rem;font-weight:800;text-decoration:none;cursor:pointer}
+.spider-update-floating a{background:#334155;color:#fff}
+.spider-update-floating button{background:#a855f7;color:#fff}
+.spider-update-floating .later{background:#475569;color:#fff}
+.spider-update-floating .close{position:absolute;right:8px;top:6px;background:transparent;color:#fff;font-size:18px;padding:0 6px}
+.spider-update-fade{opacity:0;transition:opacity .6s ease}
+</style>
+<div class="spider-update-floating" id="spiderUpdateFloating">
+    <button class="close" type="button" onclick="spidercmsPostponeUpdate()">×</button>
+    <strong>Nowa wersja SpiderCMS DEMO <?= e($spidercms_floating_update['latest_version'] ?? '') ?></strong>
+    <div>Aktualna wersja: <?= e(SPIDERCMS_VERSION) ?></div>
+    <form method="post" style="display:inline;" onsubmit="return confirm('Wykonać backup i zainstalować aktualizację DEMO?');">
+        <?= csrf_field() ?>
+        <input type="hidden" name="action" value="install_online_update">
+        <button type="submit">Aktualizuj</button>
+    </form>
+    <button type="button" class="later" onclick="spidercmsPostponeUpdate()">Później</button>
+    <?php if (!empty($spidercms_floating_update['download_url'])): ?>
+        <a href="<?= e($spidercms_floating_update['download_url']) ?>" target="_blank" rel="noopener">Pobierz</a>
+    <?php endif; ?>
+</div>
+<?php endif; ?>
+
+<script>
+function spidercmsPostponeUpdate(){
+    try { localStorage.setItem('spidercms_update_hide_until', String(Date.now() + 24*60*60*1000)); } catch(e) {}
+    document.querySelectorAll('.spider-update-floating,.spider-update-notice-global').forEach(function(el){ el.remove(); });
+}
+document.addEventListener('DOMContentLoaded', function(){
+    var until = 0;
+    try { until = parseInt(localStorage.getItem('spidercms_update_hide_until') || '0', 10); } catch(e) {}
+    if (until > Date.now()) {
+        document.querySelectorAll('.spider-update-floating,.spider-update-notice-global').forEach(function(el){ el.remove(); });
+        return;
+    }
+    setTimeout(function(){
+        document.querySelectorAll('.spider-update-floating').forEach(function(el){ el.classList.add('spider-update-fade'); });
+    }, 30000);
+    setTimeout(function(){
+        document.querySelectorAll('.spider-update-floating').forEach(function(el){ if(el && el.parentNode) el.remove(); });
+    }, 31000);
+});
+</script>
+
+
+<script>
+document.addEventListener('DOMContentLoaded',function(){
+  document.querySelectorAll('td').forEach(function(td){
+    const txt=td.textContent||'';
+    const count=(txt.includes('Edytuj LIVE')||txt.includes('Edit LIVE')?1:0)+(txt.includes('Duplikuj')||txt.includes('Duplicate')?1:0)+(txt.includes('Główna')||txt.includes('Usuń')||txt.includes('Delete')?1:0);
+    if(count>=2) td.classList.add('page-actions');
+  });
+  document.querySelectorAll('.card').forEach(function(card){
+    const t=card.querySelector('h1,h2,h3'); if(!t)return;
+    const text=t.textContent||''; if(text.includes('Najpopularniejsze strony')||text.includes('Most popular pages')) card.classList.add('stats-popular-card');
+  });
+  const preset=document.getElementById('content_width_preset'); const input=document.getElementById('content_width');
+  if(preset&&input){
+    function syncPresetToInput(){if(preset.value){input.value=preset.value;input.dispatchEvent(new Event('input',{bubbles:true}));input.dispatchEvent(new Event('change',{bubbles:true}));}}
+    function syncInputToPreset(){const value=String(input.value||'').replace(/[^0-9.]/g,'');let found=false;Array.from(preset.options).forEach(function(opt){if(opt.value&&opt.value===value)found=true;});preset.value=found?value:'';}
+    preset.addEventListener('change',syncPresetToInput); input.addEventListener('input',syncInputToPreset); syncInputToPreset();
+  }
+});
+</script>
 </body>
 </html>
