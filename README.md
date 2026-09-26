@@ -106,28 +106,9 @@ Tworzenie sliderów:
 
 ---
 
-# 📁 Struktura projektu
-
-```txt
-SpiderCMS
-├── admin.php
-├── pages/
-├── uploads/
-├── assets/
-├── .chat/
-├── .stats/
-├── .logs/
-├── .backups/
-├── .theme.json
-├── .settings.json
-└── README.md
-```
-
----
-
 # 🚀 Instalacja
 
-1. Wgraj pliki na serwer.
+1. Wgraj plik admin.php na serwer.
 2. Nadaj zapis:
 
 ```txt
