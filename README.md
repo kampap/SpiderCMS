@@ -22,8 +22,6 @@ Nie wymaga MySQL ani żadnej bazy danych — wszystkie dane przechowywane są w 
 * Logo + nazwa witryny w nagłówku
 * Edycja stylu nazwy strony
 * Regulowana szerokość treści
-* Presety motywów
-* Presety gotowych stron
 * Responsywny interfejs panelu
 
 ---
